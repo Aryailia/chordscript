@@ -9,6 +9,29 @@ use constants::*;
 const PERMUTATION_LIMIT: usize = 1000;
 
 
+// Terminology
+// 
+// A set I refering to the '{{}}' construct. These represent enumerations
+// Both the head and the body can have multiple sets
+//
+// Example ('+' and ' ' are both optional in the head)
+//   Entry:  |super {{a,b}}; ctrl + {{1,2}} ; ctrl shift b| echo
+//   Head:   |super {{a,b}}; ctrl + {{1,2}} ; ctrl shift b|
+//   Body:   echo
+//   Hotkey: super + a ; ctrl + 1 ; ctrl + shift + b
+//           super + a ; ctrl + 2 ; ctrl + shift + b
+//           super + b ; ctrl + 1 ; ctrl + shift + b
+//           super + b ; ctrl + 2 ; ctrl + shift + b
+//   Set:    {{a, b}}
+//           {{1, 2}}
+//   Chord:  super + a
+//           ctrl + 1
+//           ctrl + shift + b
+//           ...
+// A 'shortcut' is then the hotkey variant + body variant together ready
+// to be rendered in the target format
+
+
 fn main() {
     //let file = File::open("main.rs").unwrap();
     //let reader = BufReader::new(file);
@@ -18,81 +41,632 @@ fn main() {
     //}
 }
 
+//run: cargo test -- --nocapture
+//    let file = r#"
+//#hello
+//|super {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
+//|super shift {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}}
+//|super shift q|
+//
+//# Main
+//|super space ; super w| $TERMINAL -e sh -c 'echo "nmcli"; echo "===="; sudo nmtui'; statusbar-startrefresh.sh
+//|super space ; super e| $TERMINAL -e emacs-sandbox.sh -P -O d "${EMACSINIT}"
+//|super space ; super a| $TERMINAL -e alsamixer; statusbar-startrefresh.sh
+//|super space ; super s| $TERMINAL -e syncthing -no-browser
+//|super space ; super z| $TERMINAL -e htop
+//|super space ; super {{m,n}}| $TERMINAL -e tmux.sh open '{{mw.sh,newsboat}}'
+//
+//
+//|super d| dmenu_run
+//|super h| dmenu
+//"#;
+
+#[derive(Debug)]
+enum State {
+    Head,
+    HeadBrackets,
+    Body,
+    BodyBrackets,
+}
+
+#[derive(Debug)]
+struct UnparsedEntry<'a> {
+    head: &'a str,
+    body: &'a str,
+    head_set_count: usize,
+    body_set_count: usize,
+    permutation_count: usize,
+    row: usize,
+}
+
+#[derive(Debug)]
+struct EntryBlobMetadata<'a> {
+    entries: Vec<UnparsedEntry<'a>>,
+    max_head_set_count: usize,
+    max_body_set_count: usize,
+    max_permutation_count: usize,
+}
+
+// TODO: test when body has more sets than head
+// e.g. |{{a,b,c}};{{1,2,3,4}}| {{a,b}} {{e, f}} {{g,h}}
+// This has 12 vs 8 permutations, the last 4 permutations will all have the
+// same body variant but
+// The reverse case (more body variants) than 
+
+use std::cmp::max;
+
+impl<'a> EntryBlobMetadata<'a> {
+    fn push_entry(&mut self, entry: UnparsedEntry<'a>) {
+        self.max_head_set_count = max(self.max_head_set_count, entry.head_set_count);
+        self.max_body_set_count = max(self.max_body_set_count, entry.body_set_count);
+        self.max_permutation_count = max(self.max_permutation_count, entry.permutation_count);
+        self.entries.push(entry);
+    }
+}
+
+impl<'a> FirstPass<'a> {
+    fn step_init_until_first(source: &str) -> Result<(&str, usize), StepError> {
+        let mut row = 0;
+        let mut start = source.len();
+        for line in source.lines() {
+            row += 1;
+            if let Some('|') = line.chars().next() {
+                let one = 'l'.len_utf8();
+                start = line.as_ptr() as usize - source.as_ptr() as usize + one;
+                break;
+            }
+            match line.trim_start().chars().next() {
+                Some('#') => {}
+                Some(_) => return Err("Lines can only be a comment (first non-whitespace character is '#') or whitespace before the first entry (first character in line is '|')".into()),
+                None => {}
+            }
+        }
+
+        Ok((&source[start..], row))
+    }
+
+    #[inline]
+    fn step_head(&mut self, ch: char) -> PassOutput {
+        match ch {
+            '|' => {
+                let base = self.original.as_ptr() as usize;
+                let offset = self.entry.head.as_ptr() as usize - base;
+                self.entry.head = &self.original[offset..self.walker.prev];
+                self.entry.body = &self.original[self.walker.post..];
+                self.change_state(State::Body)?; // Call last
+                                                 //println!("==={:?}===\n{:?}", self.entry.head, self.entry.body);
+            }
+            '{' => {
+                if let Some('{') = self.walker.next() {
+                    // Want these three things on
+                    self.change_state(State::HeadBrackets)?; // Call last
+                } else {
+                    return Err(
+                        "Missing a second opening curly brace. Need '{{' to start an enumeration"
+                            .into(),
+                    );
+                }
+            }
+            ',' => return Err("Unexpected comma ','. Type 'comma' for the key, ';' for a chord separator. ',' only has meaning inside an enumeration group '{{..}}'".into()),
+            ';' => {
+                self.walker.eat_separator();
+                self.key_start_index = self.walker.post;
+            }
+            _ if SEPARATOR.contains(&ch) => {
+                self.walker.eat_separator();
+                self.key_start_index = self.walker.post;
+            }
+            _ => {
+                let start = self.key_start_index;
+                let key = &self.original[start..self.walker.post];
+                if key.len() > KEYSTR_MAX_LEN {
+                    panic!("Invalid keycode {:?}", key);
+                }
+                // Key validation check will happen when we parse the key
+                // so we do since we allocate at that time
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn step_head_brackets(&mut self, ch: char) -> PassOutput {
+        match ch {
+            '|' => return Err("Unexpected bar '|'. Close the enumeration first with '}}'".into()),
+            '\\' => {
+                return Err("You cannot escape characters with backslash '\\' in the hotkey definition portion".into());
+            }
+            ',' => self.head_set_member_end(),
+            '}' => {
+                if let Some('}') = self.walker.next() {
+                    self.change_state(State::Head)?; // Call last
+                } else {
+                    return Err(
+                        "Missing a second closing curly brace. Need '}}' to close an enumeration"
+                            .into(),
+                    );
+                }
+            }
+            _ if SEPARATOR.contains(&ch) => {
+                self.walker.eat_whitespace();
+                self.key_start_index = self.walker.post;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn step_body(&mut self, ch: char) -> PassOutput {
+        match (ch, self.walker.peek()) {
+            ('\n', Some('|')) => {
+                self.walker.next();
+                let base = self.original.as_ptr() as usize;
+                let offset = self.entry.body.as_ptr() as usize - base;
+                self.entry.body = &self.original[offset..self.walker.prev];
+                //println!("==={}===\n{:?}", self.entry.head, self.entry.body);
+
+                let new_entry = UnparsedEntry {
+                    head: &self.original[self.walker.post..],
+                    body: &self.original[self.walker.post..],
+                    head_set_count: 0,
+                    body_set_count: 0,
+                    permutation_count: 1,
+                    row: self.walker.row,
+                };
+                self.metadata
+                    .push_entry(replace(&mut self.entry, new_entry));
+
+                self.change_state(State::Head)?; // Call last
+            }
+            ('{', Some('{')) => self.change_state(State::BodyBrackets)?, // Call last
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn step_body_brackets(&mut self, ch: char) -> PassOutput {
+        match ch {
+            '\\' => {
+                self.walker.next();
+            }
+            ',' => self.body_set_member_end()?,
+            '}' => {
+                if let Some('}') = self.walker.next() {
+                    self.change_state(State::Body)?; // Call last
+                } else {
+                    return Err("Missing a second closing curly brace. Need '}}' to close. If you want a '}' as output, escape it with backslash like '\\}'".into());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn head_set_start(&mut self) {
+        self.walker.eat_separator();
+        self.key_start_index = self.walker.post;
+        self.head_set_size = 0;
+    }
+
+    #[inline]
+    fn head_set_member_end(&mut self) {
+        self.walker.eat_separator();
+        self.key_start_index = self.walker.post;
+        self.head_set_size += 1;
+    }
+
+    #[inline]
+    fn head_set_close(&mut self) -> Result<(), StepError> {
+        self.head_set_size += 1;
+        self.entry.permutation_count *= self.head_set_size;
+        self.entry.head_set_count += 1;
+        //println!("group_end {:?}", self.entry.permutation_count, )
+        if self.entry.permutation_count > PERMUTATION_LIMIT {
+            return Err("Too many permutations for <line>".into());
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn body_set_start(&mut self) {
+        self.body_set_size = 0;
+    }
+
+    #[inline]
+    fn body_set_member_end(&mut self) -> Result<(), StepError> {
+        self.body_set_size += 1;
+        let permutation_test= self.body_set_size * self.body_permutation_count;
+        if permutation_test > self.entry.permutation_count {
+            Err(
+                "This body for (TODO) needs more options than there are hotkey permutations for"
+                    .into(),
+            )
+        } else {
+            Ok(())
+        }
+    }
+    #[inline]
+    fn body_set_close(&mut self) -> Result<(), StepError> {
+        self.body_set_member_end()?; // adds to 'self.body_set_size'
+        self.entry.body_set_count += 1;
+        self.body_permutation_count *= self.body_set_size;
+        Ok(())
+    }
+
+    fn change_state(&mut self, target: State) -> Result<(), StepError> {
+        // From 'self.state' to 'target'
+        match (&self.state, &target) {
+            (_, State::HeadBrackets) => self.head_set_start(),
+            (State::HeadBrackets, _) => self.head_set_close()?,
 
 
-//use std::mem::discriminant;
+            (_, State::BodyBrackets) => self.body_set_start(),
+            (State::BodyBrackets, _) => self.body_set_close()?,
 
-//impl std::fmt::Display for Chord {
-//    fn write(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//        match self {
-//            Modifier::Shift => write!(f, "Shift"),
-//            Modifier::Shift => write!(f, "Shift"),
-//            Modifier::Shift => write!(f, "Shift"),
+            (_, State::Head) => {
+                self.walker.eat_separator();
+                self.key_start_index = self.walker.post;
+            }
+
+            // TODO: Maybe change to compile-time state transition validation
+            // See 'pretty state machines' blog post
+            _ => {} // Maybe panic on invalid transitions? Kind of unnecessary
+        }
+        self.state = target;
+        Ok(())
+    }
+}
+
+use std::mem::replace;
+
+type StepError = String;
+type PassOutput<'a> = Result<(), StepError>;
+struct FirstPass<'a> {
+    original: &'a str,
+    walker: CharsWithIndex<'a>,
+    state: State,
+
+    key_start_index: usize,
+    head_set_size: usize,
+    body_set_size: usize,
+    body_permutation_count: usize,
+
+    entry: UnparsedEntry<'a>,
+    metadata: EntryBlobMetadata<'a>,
+}
+fn first_pass(source: &str) -> Result<EntryBlobMetadata, String> {
+    let (text, start_row) = FirstPass::step_init_until_first(source)?;
+    let mut fsm = FirstPass {
+        original: text,
+        walker: CharsWithIndex::new(text, start_row),
+        state: State::Head,
+
+        key_start_index: 0,
+        head_set_size: 0,
+        body_set_size: 0,
+        body_permutation_count: 0,
+
+        entry: UnparsedEntry {
+            head: text,
+            body: text,
+            head_set_count: 0,
+            body_set_count: 0,
+            permutation_count: 1,
+            row: start_row,
+        },
+        metadata: EntryBlobMetadata {
+            entries: Vec::with_capacity(text.split("\n|").count()),
+            max_head_set_count: 0,
+            max_body_set_count: 0,
+            max_permutation_count: 1,
+        },
+    };
+
+    while let Some(ch) = fsm.walker.next() {
+        match fsm.state {
+            State::Head => fsm.step_head(ch)?,
+            State::HeadBrackets => fsm.step_head_brackets(ch)?,
+            State::Body => fsm.step_body(ch)?, // This may push
+            State::BodyBrackets => fsm.step_body_brackets(ch)?,
+        };
+    }
+    if let State::HeadBrackets | State::BodyBrackets = fsm.state {
+        return Err("Brackets not closed. Expected a '}}'".into());
+    }
+    let last = fsm.entry;
+    if !last.head.is_empty() {
+        fsm.metadata.push_entry(last);
+    }
+    Ok(fsm.metadata)
+}
+
+#[inline]
+fn peek_while<T, F>(iter: &mut std::iter::Peekable<T>, mut predicate: F)
+    where T: Iterator,
+          F: FnMut(&T::Item) -> bool
+{
+    while let Some(item) = iter.peek() {
+        if !predicate(item) {
+            break;
+        }
+        iter.next();
+    }
+
+}
+
+#[inline]
+fn next_until<T, F>(iter: &mut T, mut predicate: F)
+    where T: Iterator,
+          F: FnMut(T::Item) -> bool
+{
+    while let Some(item) = iter.next() {
+        if predicate(item) {
+            break;
+        }
+    }
+
+}
+
+fn render_head_variant(
+    head: &str,
+    permutation: &[usize]
+) -> Result<Hotkey, String> {
+    let mut walker = DelimSplit::new(head, 1, split_separator).peekable();
+    let mut set_index = 0;
+
+
+    let mut modifiers = 0;
+    let mut key = None;
+    let mut chords = Vec::new();
+
+    fn push_chord<'a>(
+        chords: &mut Vec<Chord>,
+        key: &mut Option<Key>,
+        modifiers: &mut Modifiers
+    ) -> Result<(), StepError> {
+        if let Some(code) = replace(key, None) {
+            chords.push(Chord {
+                key: code,
+                modifiers: replace(modifiers, 0),
+            });
+            Ok(())
+        } else {
+            Err("No key set".into())
+        }
+    };
+
+    while let Some((field, _, _row)) = walker.next() {
+        match field {
+            "{{" => {
+                let mut count = 0;
+                let choice = permutation[set_index];
+                peek_while(&mut walker, |(peek, _, _)| {
+                    if count >= choice {
+                        false
+                    } else {
+                        if *peek == "," {
+                            count += 1;
+                        }
+                        true
+                    }
+                });
+            }
+            // 'first_pass()' ensures ',' is never outside of '{{..}}'
+            "," => next_until(&mut walker, |(field,_,_)| field == "}}"),
+            "}}" => set_index += 1,
+            ";" => push_chord(&mut chords, &mut key, &mut modifiers)?,
+
+            "shift" => modifiers |= Mod::Shift as Modifiers,
+            "super" => modifiers |= Mod::Super as Modifiers,
+            "ctrl" => modifiers |= Mod::Ctrl as Modifiers,
+            "alt" => modifiers |= Mod::Alt as Modifiers,
+
+            _ if key.is_some() => panic!("Key already defined"),
+            _  => {
+                if let Some(i) = KEYSTRS.iter().position(|x| *x == field) {
+                    key = Some(KEYCODES[i].clone());
+                } else {
+                    return Err(format!("Key {:?} not found", field));
+                }
+            }
+        }
+    }
+    push_chord(&mut chords, &mut key, &mut modifiers)?;
+    Ok(Hotkey(chords))
+}
+
+
+fn split_separator(substr: &str) -> Range<usize> {
+    let mut chars = substr.chars();
+    let mut delim_start = 0;
+    let mut delim_close = 0;
+
+    while let Some(ch) = chars.next() {
+        delim_close += ch.len_utf8(); // represents post index
+        // At this point, `ch == &substr[delim_start..delim_close]`
+        match ch {
+            '{' | '}' if delim_start == 0 => {
+                chars.next();
+                delim_close += '}'.len_utf8();
+                delim_start = delim_close;
+                break;
+            }
+            '{' | '}' => return delim_start..delim_start,
+            ',' | ';' if delim_start == 0 => {
+                delim_start = delim_close;
+                break;
+            }
+            ',' | ';' => return delim_start..delim_start,
+            _ if SEPARATOR.contains(&ch) => break,
+            _ => delim_start = delim_close, // represents prev index
+        }
+    }
+
+    // Eat separators
+    while let Some(ch) = chars.next() {
+        match ch {
+            _ if !SEPARATOR.contains(&ch) => break,
+            _ => {}
+        }
+        // Although this is a post-index, add after to simulate 'chars.peek()'
+        delim_close += ch.len_utf8(); // Post last separator
+    }
+    delim_start..delim_close
+}
+
+//fn third_pass(metadata: EntryBlobMetadata) {
+//}
+
+//impl<'a> IntoIterator for EntryBlobMetadata<'a> {
+//    type Item = (&'a mut[&'a str], &'a mut[Cow<'a, str>]);
+//    type IntoIter = VariantGenerator<'a>;
+//}
+struct PermutationsGenerator<'a> {
+    //entries: Vec<
+    head_calculator_memory: Vec<usize>,
+    body_calculator_memory: Vec<usize>,
+    head_variant_memory: Vec<&'a str>,
+
+    //head_variants: Vec<&'a str>,
+    //body_variants: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
+
+    entries: Vec<UnparsedEntry<'a>>,
+}
+impl<'a> EntryBlobMetadata<'a> {
+    fn allocate(self) -> PermutationsGenerator<'a> {
+        PermutationsGenerator {
+            head_calculator_memory: vec![0; self.max_head_set_count * 3],
+            body_calculator_memory: vec![0; self.max_body_set_count * 3],
+            head_variant_memory: Vec::with_capacity(self.max_permutation_count),
+
+            //head_variants: Vec::with_capacity(head_len),
+            //body_variants: Vec::with_capacity(body_len),
+
+            entries: self.entries,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Calculator<'b> {
+    permutation: &'b mut [usize],
+    set_sizes: &'b mut [usize],
+    digit_values: &'b mut [usize],
+}
+impl<'b> Calculator<'b> {
+    fn new(
+        source: &str,
+        set_count: usize,
+        memory: &'b mut [usize],
+    ) -> Self {
+        let (permutation, rest) = memory.split_at_mut(set_count);
+        let (set_sizes, rest) = rest.split_at_mut(set_count);
+        let (digit_values, _) = rest.split_at_mut(set_count);
+        if set_count > 0 { // split of non-blank is minimum 'len()' 1
+            // Splits into regular keys and optional (enumerated) keys
+            let reg_opt_pairs = DelimSplit::new(source, 1, split_brackets);
+            for (i, (_, brackets, _)) in reg_opt_pairs.enumerate() {
+                if !brackets.is_empty() { // Must be at least "{{}}"
+                    set_sizes[i] = brackets.split(',').count();
+                }
+            }
+            let mut product = 1;
+            for (i, total) in set_sizes.iter().enumerate().rev() {
+                digit_values[i] = product;
+                product *= *total;
+            }
+        }
+        Calculator {
+            permutation,
+            set_sizes,
+            digit_values,
+        }
+    }
+
+    fn permute(&mut self, permutation_index: usize) -> &[usize] {
+        for i in 0..self.permutation.len() {
+            let x = permutation_index / self.digit_values[i];
+            self.permutation[i] = x % self.set_sizes[i];
+        }
+        &self.permutation
+    }
+}
+
+
+//impl<'a> EntryBlobMetadata<'a> {
+//    fn allocate(self) -> PermutationsGenerator<'a> {
+//        let memory_mid = self.max_head_set_count * 2;
+//        let memory_total = memory_mid + self.max_body_set_count * 2;
+//        let (head_len, body_len) = self.entries.iter()
+//            .fold((0, 0),|(mut head_len, mut body_len), entry| {
+//                head_len += if entry.head_set_count == 0 {
+//                    1
+//                } else {
+//                    entry.head_set_count * entry.permutation_count + 2
+//                };
+//                body_len += if entry.body_set_count == 0 {
+//                    1
+//                } else {
+//                    entry.body_set_count * entry.permutation_count + 2
+//                };
+//                (head_len, body_len)
+//            });
+//        PermutationsGenerator {
+//            calculator_memory: Vec::with_capacity(memory_total),
+//            memory_mid,
+//            head_variants: Vec::with_capacity(head_len),
+//            body_variants: Vec::with_capacity(body_len),
+//
+//            entries: self.entries,
 //        }
 //    }
 //}
 
-//run: cargo test -- --nocapture
-//#[test]
-fn hello() {
-    let file = r#"
-#hello
-|super {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
-|super shift {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}}
-|super shift q|
-
-# Main
-|super space ; super w| $TERMINAL -e sh -c 'echo "nmcli"; echo "===="; sudo nmtui'; statusbar-startrefresh.sh
-|super space ; super e| $TERMINAL -e emacs-sandbox.sh -P -O d "${EMACSINIT}"
-|super space ; super a| $TERMINAL -e alsamixer; statusbar-startrefresh.sh
-|super space ; super s| $TERMINAL -e syncthing -no-browser
-|super space ; super z| $TERMINAL -e htop
-|super space ; super {{m,n}}| $TERMINAL -e tmux.sh open '{{mw.sh,newsboat}}'
+//struct EntryBlobMetadata<'a> {
+//    entries: Vec<UnparsedEntry<'a>>,
+//    max_head_set_count: usize,
+//    max_body_set_count: usize,
+//}
+//struct UnparsedEntry<'a> {
+//    head: &'a str,
+//    body: &'a str,
+//    head_set_count: usize,
+//    body_set_count: usize,
+//    permutation_count: usize,
+//    row: usize,
+//}
 
 
-|super d| dmenu_run
-|super h| dmenu
-"#;
-    println!("{}", Hotkey(vec![
-        Chord { key: "a", modifiers: Mod::Shift | Mod::Ctrl },
-        Chord { key: "b", modifiers: Mod::Shift.into() },
-    ]));
 
-    //parse(file);
-    let size = file.split("\n|").count();
-    let _output = Vec::<Shortcut>::with_capacity(size);
-    //println!("{} {}", size, split(file.trim_start()).count());
-
-    let trimmed_file = file.trim_start();
-    // .unwrap_or('a') could be anything but whitespace
-    let first_non_whitespace = trimmed_file.chars().next().unwrap_or('a');
-    let first_non_whitespace = file.find(first_non_whitespace).unwrap_or(0);
-    let start_row = file[0..first_non_whitespace].lines().count();
-    //let final_row = split(file, 1).last().map(|(_, _, r)| r).unwrap_or(1);
-
-    for (entry, _, _row) in split(trimmed_file, start_row) {
-        //println!("{}: {:?}", r, entry);
-        match entry.chars().next() {
-            Some('|') => {
-                //parse_entry(&entry['|'.len_utf8()..])
-                //let after_start = &entry['|'.len_utf8()..];
-                //if let Some(closing_pipe) = after_start.find('|') {
-                //    let (hotkey, body) = after_start.split_at(closing_pipe);
-                //    output.push(Shortcut {
-                //        hotkey,
-                //        action: vec![body],
-                //    });
-                //} else {
-                //    panic!("Cannot find a closing pipe at {}", row);
-                //}
-            }
-            Some('#') => {} // Skip comments
-            Some(_) => panic!("Invalid"),
-            None => {}
-        }
-        //println!("line: {:?}", entry);
-    }
-}
+//struct EntryVariantGenerator<'a> {
+//    head: &'a str,
+//    head_set_sizes: &'a [usize],
+//    head_permutation: &'a [usize],
+//    head_memory: &'a [&'a str],
+//
+//    body: &'a str,
+//    body_set_sizes: &'a [usize],
+//    body_permutation: &'a [usize],
+//    body_memory: &'a [Cow<'a,str>],
+//
+//    index: usize,
+//    permutation_count: usize,
+//}
+//
+//impl<'a> Iterator for EntryVariantGenerator<'a> {
+//    type Item = Variant<'a>;
+//    fn next(&mut self) -> Option<Self::Item> {
+//        None
+//    }
+//}
+//struct Variant<'a> {
+//    head: &'a str,
+//    body: &'a [Cow<'a, str>],
+//}
 
 #[test]
 fn parser() {
@@ -100,296 +674,246 @@ fn parser() {
     //println!("line: {:?}", line);
     //parse_entry(line);
 
-    let line = r#"|super {{x, y}} ; super {{a,b}}|
+    let _line = r#"|super {{x, y}} ; super {{a }} ; super {{a,b}}|
         echo {{1,2,3,4}}
     "#;
-    println!("{:#?}", parse_entry(line));
+    //println!("{:#?}", parse_entry(line));
     //println!("{:?}", split_head_body_and_validate(&line['|'.len_utf8()..]));
-}
+    //println!("{:?}", &line[line.len()..]);
 
-fn parse_entry(entry: &str) -> Result<Vec<Shortcut>, ()> {
-    //let head_end = after_first_pipe.find('|').unwrap_or(after_first_pipe.len());
-    let after_first_pipe = if let Some('|') = entry.chars().next() {
-        &entry['|'.len_utf8()..]
-    } else {
-        panic!("DEV: called 'parse_entry' on something not an shortcut entry")
-    };
-    let (head, body) = split_head_body_and_validate(after_first_pipe)?;
-    println!("first {:?} {:?}", head, body);
+    let _file = r#"
+    #
+#hello
+|super {{, alt, ctrl, ctrl alt}} Return|
+  {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
+|super {{c, t,g}} ; super {{b,s}}|
+  $TERMINAL -e {{curl,browser.sh}}  '{{terminal,gui}}' '{{bookmarks,search}}'
 
-    let field_count = SpanDelimiterSplit::new(head, 1, split_brackets).count();
-    let permutation_field_totals = {
-        let mut by_fields = Vec::with_capacity(field_count);
-        by_fields.extend(SpanDelimiterSplit::new(head, 1, split_brackets)
-            .map(|(_, delim, _)| delim.split(',').count()));
-        by_fields
-    };
-
-    let permutation_count = permutation_field_totals.iter().product::<usize>();
-    if permutation_count > PERMUTATION_LIMIT {
-        panic!("Too many permutations");
-    }
-
-    let num_variants =
-        enumerate_num_variants(permutation_field_totals, permutation_count);
-
-    // Render "num_variants" into String's
-    let string_variants =
-        convert_to_string_variants(head, num_variants, permutation_count);
-
-    let mut variants = Vec::with_capacity(permutation_count);
-    for (i, head_variant) in string_variants.iter().enumerate() {
-        let hotkey = parse_into_hotkey(head_variant).unwrap();
-        // TODO: make this actually take hotkey
-        variants.push(Shortcut {
-            hotkey: hotkey.0[0].key.to_string(),
-            action: select_body_variant(body, i, field_count),
+|super shift q|"#;
+    let first = first_pass(_file).unwrap();
+    if false {
+        first.entries.iter().for_each(|x| {
+            println!(
+                "{}|==={}=== {} {} {}",
+                x.row, x.head, x.head_set_count, x.body_set_count, x.permutation_count
+            );
+            println!("{:?}", x.body);
         });
+        println!("Head sets: {}", first.max_head_set_count);
+        println!("Body sets: {}", first.max_body_set_count);
+        //println!("Second {:?}", first);
     }
-    //Ok(())
-    Ok(variants)
-}
 
+    let mut second = first.allocate();
+    for UnparsedEntry {
+        row: _row,
+        head,
+        head_set_count,
+        body,
+        body_set_count,
+        permutation_count,
+    } in second.entries {
+        let mut head_calc = Calculator::new(
+            head,
+            head_set_count,
+            &mut second.head_calculator_memory,
+        );
+        let mut body_calc = Calculator::new(
+            body,
+            body_set_count,
+            &mut second.body_calculator_memory,
+        );
+        //let head_variant = &mut second.head_variant_memory;
+        //head_variant.clear();
+        for i in 0..permutation_count {
+            let hotkey = render_head_variant(head, head_calc.permute(i));
+            //let cmd = render_body(body, permutation_count, body_calc.permute(i));
+            let cmd = render_body(body.trim(), permutation_count, body_calc.permute(i));
 
-#[derive(Debug)]
-enum HeadState {
-    Head,
-    Brackets,
-}
-#[derive(Debug)]
-enum BodyState {
-    Body,
-    Brackets,
-}
-
-// This ensures all subsequent parsing does not need to return error
-// Instead, subsequent `panic!(...)` indicate inconsitent grammar implementation
-fn split_head_body_and_validate(after_first_pipe: &str) -> Result<(&str, &str), ()> {
-    // Validate the head and calculate 'head_end'
-    let mut head_end = 0;
-    let mut chars = after_first_pipe.chars();
-    let mut state = HeadState::Head;
-    while let Some(ch) = chars.next() {
-        match state {
-            HeadState::Head => match ch {
-                '|' => break, // thus 'head_end' is before closing pipe
-                '{' => {
-                    if let Some('{') = chars.next() {
-                        head_end += '{'.len_utf8();
-                        state = HeadState::Brackets;
-                    } else {
-                        panic!("Missing a second opening curly brace. Need '{{' to start an enumeration");
-                    }
-                }
-                // TODO: check is valid key
-                _ => {}
-            }
-            HeadState::Brackets => match ch {
-                '\\' => {
-                    panic!("You cannot escape characters with backslash '\\' in the hotkey definition portion");
-                }
-                '}' => {
-                    if let Some('}') = chars.next() {
-                        head_end += '}'.len_utf8(); // first '}' already added
-                        state = HeadState::Head;
-                    } else {
-                        panic!("Missing a second closing curly brace. Need '}}' to close an enumeration");
-                    }
-                }
-                _ => {}
-            }
-        }
-        head_end += ch.len_utf8(); // Placed here so '|' breaks before adding
-    }
-    if head_end == after_first_pipe.len() {
-        panic!("Shortcut hotkey definition still open, no closing '|' found");
-    }
-    let head_end = head_end; // No more changes to 'index'
-
-
-    // Validate the body
-    let mut state = BodyState::Body;
-    while let Some(ch) = chars.next() {
-        match state {
-            BodyState::Body => match ch {
-                '{' => {
-                    if let Some('{') = chars.next() {
-                        state = BodyState::Brackets;
-                    }
-                }
-                _ => {}
-            }
-            BodyState::Brackets => match ch {
-                '\\' => { chars.next(); }
-                '}' => {
-                    if let Some('}') = chars.next() {
-                        state = BodyState::Body;
-                    } else {
-                        panic!("Missing a second closing curly brace. Need '}}' to close");
-                    }
-                }
-                _ => {}
-            }
+            println!("{}", hotkey.unwrap());
+            println!("  {}", cmd.join(""));
         }
     }
-
-
-    Ok((
-        &after_first_pipe[0..head_end],
-        &after_first_pipe[head_end+'|'.len_utf8()..],
-    ))
 }
 
 use std::borrow::Cow;
-fn select_body_variant(body: &str, variant_index: usize, field_count: usize) -> Vec<Cow<str>> {
-    let mut body_variant = Vec::with_capacity(field_count + 1);
+fn render_body<'a>(
+    body: &'a str,
+    set_count: usize,
+    permutation: &[usize]
+) -> Vec<Cow<'a, str>> {
+    let mut output = Vec::with_capacity(set_count);
     let mut buffer = String::new();
-    for (key, delim, _row) in SpanDelimiterSplit::new(body, 1, split_brackets) {
-        body_variant.push(key.into());
-        //println!("{:?} {:?}", key, delim);
+    let split = DelimSplit::new(body, 1, split_brackets);
+    for (set_index, (regular, delim, _row)) in split.enumerate() {
+        output.push(regular.into());
 
-        // Process the bracketed options ('delim')
+        buffer.clear();
         let delim = if delim.is_empty() {
             delim
         } else {
+            buffer.reserve(delim.len() - "{{}}".len());
             &delim["{{".len()..]
         };
 
         // Basically a `delim.split(',')` but with escaping backslash
         // Additionally escaped newlines are ignored (similar to shellscript)
         // Push the delim when we get to the correct field
-        let mut walker = delim.chars();
+        let mut walker = delim.chars().peekable();
         let mut start = 0;
-        let mut until = 0;
-        let mut fields_visited = 0;
+        let mut until = start;
+        let mut field_index = 0;
         while let Some(ch) = walker.next() {
             match ch {
                 '\\' => {
                     buffer.push_str(&delim[start..until]);
                     let escaped = walker.next().unwrap();
                     if escaped != '\n' {
-                        buffer.push(escaped);
+                        buffer.push(escaped); // Special case escaped newline
                     }
                     until += '\\'.len_utf8() + escaped.len_utf8();
                     start = until;
                 }
                 ',' | '}' => {
-                    if variant_index == fields_visited {
+                    if field_index == permutation[set_index] {
                         buffer.push_str(&delim[start..until]);
-                        body_variant.push(buffer.split_off(0).into());
+                        output.push(buffer.split_off(0).into());
                         break;
                     }
                     debug_assert_eq!(','.len_utf8(), '}'.len_utf8());
                     start = until + ','.len_utf8();
                     until = start;
-                    fields_visited += 1;
+                    field_index += 1;
                     buffer.clear();
                 }
                 c => until += c.len_utf8(),
             }
         }
+        //println!("{:?} {:?}", regular, brackets);
     }
-    body_variant
+    output
 }
 
-fn parse_into_hotkey(head: &str) -> Result<Hotkey, ()> {
-    let mut split = SpanDelimiterSplit::new(head, 1, |substr| {
-        if let Some(start) = substr.find(&SEPARATOR[..]) {
-            let mut after_delimit = substr[start..].chars();
-            while let Some(ch) = after_delimit.next()  {
-                if !SEPARATOR.iter().any(|c| *c == ch) {
-                    break
-                }
-            }
-            // SAFETY: `after_delimit.next()` called so can always `- 1`
-            // At max len: `after_delimit.as_str().len() + 1 == start`
-            start..substr.len() - after_delimit.as_str().len() - 1
-        } else {
-            substr.len()..substr.len()
-        }
-    }).peekable();
 
-    let mut modifiers = 0;
-    let mut key: Option<&str> = None;
-    // Hotkeys likely 1-4 in chords in length, 'with_capacity()' unneeded
-    let mut chords = Vec::new();
-    while let Some((field, delim, _row)) = split.next() {
-        match field  {
-            "shift" => modifiers |= Mod::Shift as Modifiers,
-            "super" => modifiers |= Mod::Super as Modifiers,
-            "ctrl" =>  modifiers |= Mod::Ctrl as Modifiers,
-            "alt" =>   modifiers |= Mod::Alt as Modifiers,
-            _ if key.is_some() => panic!("Key already defined"),
-            _ if KEYCODES.contains(&field) => key = Some(field),
-            _ => panic!("Invalid key {}", field),
-        }
 
-        if delim.contains(';') || split.peek().is_none() {
-            if let Some(code) = key {
-                chords.push(Chord { key: code, modifiers })
+
+/******************************************************************************
+ * A 'std::str::Chars' wrapper for use in 'first_pass()'
+ ******************************************************************************/
+struct CharsWithIndex<'a> {
+    pub(self) iter: std::iter::Peekable<std::str::Chars<'a>>,
+    prev: usize,
+    post: usize,
+    row: usize,
+    col: usize,
+    last_char: char,
+}
+impl<'a> CharsWithIndex<'a> {
+    fn new(text: &'a str, start_row: usize) -> Self {
+        let last_char = ' ';
+        debug_assert!(last_char != '\n');
+        Self {
+            iter: text.chars().peekable(),
+            prev: 0,
+            post: 0,
+            row: start_row,
+            col: 0,
+            last_char,
+        }
+    }
+
+    #[inline]
+    fn peek(&mut self) -> Option<&<Self as Iterator>::Item> {
+        self.iter.peek()
+    }
+
+    fn eat_whitespace(&mut self) {
+        while let Some(peek) = self.iter.peek() {
+            if peek.is_whitespace() {
+                self.next();
             } else {
-                panic!("No key set")
-            }
-            modifiers = 0;
-            key = None;
-        }
-    }
-    //chords.iter().for_each(|s| println!("Shortcut {}", s));
-    Ok(Hotkey(chords))
-}
-
-
-fn enumerate_num_variants(field_totals: Vec<usize>, permutation_count: usize) -> Vec<Vec<usize>> {
-    // Build up enumerations for picking variants in 'head'
-    // TODO: Maybe a way to enumerate with modulus?
-    let field_count = field_totals.len();
-    let mut num_variants = Vec::with_capacity(permutation_count);
-    let mut variant = Vec::with_capacity(field_count);
-    variant.resize(field_count, 0);
-    let last = field_count - 1;
-    // Basically doing a carry-add with bases of 'permutations[..]'
-    for _ in 0..permutation_count - 1 {
-        num_variants.push(variant.clone());
-
-        variant[last] += 1;
-        // Calculate the carry
-        // Order is enumerate the last first
-        for i in (0..field_count-1).rev() { // will not overflow so can skip 0
-            if variant[i+1] >= field_totals[i+1] {
-                variant[i+1] = 0;
-                variant[i] += 1;
+                break;
             }
         }
     }
-    num_variants.push(variant);
-    //num_variants.iter().for_each(|v| println!("{:?}", v));
-    num_variants
-}
-fn convert_to_string_variants(
-    head: &str,
-    num_variants: Vec<Vec<usize>>,
-    permutation_count: usize,
-) -> Vec<String> {
-    let mut rendered_variants = Vec::with_capacity(permutation_count);
-    for permutation in num_variants {
-        let mut variant = String::with_capacity(head.len());
-        let split = SpanDelimiterSplit::new(head, 1, split_brackets);
-        for (i, (unbracketed, brackets, _r)) in split.enumerate() {
-            let inside = "{{".len()..brackets.len() - "}}".len();
-            variant.push_str(unbracketed);
-            let choice = brackets[inside].split(',').nth(permutation[i]);
-            variant.push_str(choice.unwrap());
+
+    fn eat_separator(&mut self) {
+        while let Some(peek) = self.iter.peek() {
+            if SEPARATOR.contains(peek) {
+                self.next();
+            } else {
+                break;
+            }
         }
-        rendered_variants.push(variant);
-
     }
-    //rendered_variants.iter().for_each(|v| println!("{:?}", v));
-    rendered_variants
 }
 
+//
+impl<'a> Iterator for CharsWithIndex<'a> {
+    type Item = char;
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        if let Some(c) = self.iter.next() {
+            // This is sound in the first '.next()' case
+            // (prev, post) => (0, 0).next() -> (0, 1)
+            self.prev = self.post;
+            self.post += c.len_utf8();
 
+            self.col += 1;
+            if self.last_char == '\n' {
+                self.row += 1;
+                self.col = 1;
+            }
+            self.last_char = c;
+
+            Some(c)
+        } else {
+            self.prev = self.post;
+            None
+        }
+    }
+}
+
+#[test]
+fn chars_with_index() {
+    let mut iter = CharsWithIndex::new("a", 1);
+    assert_eq!(iter.next(), Some('a'));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+
+    let mut iter = CharsWithIndex::new("", 1);
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+
+    let mut iter = CharsWithIndex::new("你m好!!我是y只mao", 1);
+    assert_eq!(iter.next(), Some('你'));
+    assert_eq!(iter.next(), Some('m'));
+    assert_eq!(iter.next(), Some('好'));
+    assert_eq!(iter.next(), Some('!'));
+    assert_eq!(iter.next(), Some('!'));
+    assert_eq!(iter.next(), Some('我'));
+    assert_eq!(iter.next(), Some('是'));
+    assert_eq!(iter.next(), Some('y'));
+    assert_eq!(iter.next(), Some('只'));
+    assert_eq!(iter.next(), Some('m'));
+    assert_eq!(iter.next(), Some('a'));
+    assert_eq!(iter.next(), Some('o'));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next(), None);
+
+    let source = "你m好!!我是y只mao";
+    let mut iter = CharsWithIndex::new(source, 1);
+    while let Some(c) = iter.next() {
+        assert_eq!(&c.to_string(), &source[iter.prev..iter.post]);
+    }
+
+    // TODO: test peek and eat_whitespace
+    //let mut iter = CharsWithIndex::new("你m好!!我", 1);
+}
+
+/******************************************************************************
+ * A 'std::str::Chars' wrapper for use in 'first_pass()'
+ ******************************************************************************/
 use std::ops::Range;
-
 
 // Split with delimiter of '{{..}}'
 // Backslash escaping is allowed within the delimiter
@@ -425,9 +949,8 @@ fn split_brackets(substr: &str) -> Range<usize> {
     start..close
 }
 
-
-fn split(source: &str, start_row: usize) -> SpanDelimiterSplit {
-    SpanDelimiterSplit {
+fn split(source: &str, start_row: usize) -> DelimSplit {
+    DelimSplit {
         buffer: source,
         row: start_row,
         delimit_by: |substr| {
@@ -440,17 +963,17 @@ fn split(source: &str, start_row: usize) -> SpanDelimiterSplit {
             } else {
                 comment..comment
             }
-        }
+        },
     }
 }
 
-struct SpanDelimiterSplit<'a> {
+struct DelimSplit<'a> {
     buffer: &'a str,
     row: usize,
     delimit_by: fn(&str) -> Range<usize>,
 }
-impl<'a> SpanDelimiterSplit<'a> {
-    fn new(s: &'a str, start_row: usize, f: fn (&str) -> Range<usize>) -> Self {
+impl<'a> DelimSplit<'a> {
+    fn new(s: &'a str, start_row: usize, f: fn(&str) -> Range<usize>) -> Self {
         Self {
             buffer: s,
             row: start_row,
@@ -459,7 +982,7 @@ impl<'a> SpanDelimiterSplit<'a> {
     }
 }
 
-impl<'a> Iterator for SpanDelimiterSplit<'a> {
+impl<'a> Iterator for DelimSplit<'a> {
     type Item = (&'a str, &'a str, usize);
     fn next(&mut self) -> Option<Self::Item> {
         let rel_delim = (self.delimit_by)(self.buffer);
@@ -473,8 +996,6 @@ impl<'a> Iterator for SpanDelimiterSplit<'a> {
             Some((field, delimiter, row))
         } else {
             None
-
         }
     }
 }
-

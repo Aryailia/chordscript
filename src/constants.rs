@@ -9,10 +9,10 @@ pub struct Shortcut<'a> {
 }
 
 #[derive(Debug)]
-pub struct Hotkey<'a>(pub Vec<Chord<'a>>);
+pub struct Hotkey(pub Vec<Chord>);
 
-impl std::fmt::Display for Hotkey<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let chords = &self.0;
         if !chords.is_empty() {
             write!(f, "{}", chords[0])?;
@@ -25,21 +25,21 @@ impl std::fmt::Display for Hotkey<'_> {
 }
 
 #[derive(Debug)]
-pub struct Chord<'a> {
-    pub key: &'a str,
+pub struct Chord {
+    pub key: Key,
 
     // TODO: Make this into a bit field?
     pub modifiers: u16,
 }
-impl std::fmt::Display for Chord<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Display for Chord {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let modifier_bitfield = self.modifiers;
         for i in 0..MOD_SIZE {
             if modifier_bitfield & (1 << i) > 0 {
                 write!(f, "{:?} + ", NUM_TO_MOD[i as usize].clone())?;
             }
         }
-        write!(f, "{}", self.key)
+        write!(f, "{:?}", self.key)
     }
 }
 
@@ -86,8 +86,9 @@ enum_mod! {
 }
 
 // https://www.unicode.org/Public/UCD/latest/ucd/PropList.txt
-pub const SEPARATOR: [char; 27] = [
-    '+', ';', // rest is whitespace as defined by unicode
+// These contain no semantic meaning in head
+pub const SEPARATOR: [char; 26] = [
+    '+', // rest is whitespace as defined by unicode
     '\u{0009}', '\u{000a}', '\u{000b}', '\u{000c}', '\u{000d}', '\u{0020}', '\u{0085}', '\u{00a0}',
     '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
     '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}',
@@ -100,14 +101,20 @@ macro_rules! declare_keycodes {
             $($variant,)*
             Size,
         }
+
+        #[derive(Clone, Debug)]
         pub enum Key {
             $($variant,)*
         }
 
         // TODO: replace this with phf::Map?
         // Might be too bloated for minor speedup
-        pub const KEYCODES: [&'static str; _KeySize::Size as usize] = [
+        pub const KEYSTRS: [&'static str; _KeySize::Size as usize] = [
             $($keystr,)*
+        ];
+
+        pub const KEYCODES: [Key; _KeySize::Size as usize] = [
+            $(Key::$variant,)*
         ];
 
         pub const KEYSTR_MAX_LEN: usize = {
@@ -164,13 +171,20 @@ declare_keycodes! {
     "8"       = Eight,
     "9"       = Nine,
     "Return"  = Return,
+    "Comma"   = Comma,
 }
 
 #[test]
-fn unique_keycodes() {
+fn unique_keys() {
+    use std::mem::discriminant;
+    for (i, k1) in KEYSTRS.iter().enumerate() {
+        for k2 in KEYSTRS[i + 1..].iter() {
+            assert!(k1 != k2, "{:?} is duplicated", k1);
+        }
+    }
     for (i, k1) in KEYCODES.iter().enumerate() {
         for k2 in KEYCODES[i + 1..].iter() {
-            assert!(k1 != k2, "\"{}\" is duplicated", k1);
+            assert!(discriminant(k1) != discriminant(k2), "\"{:?}\" is duplicated", k1);
         }
     }
 }
