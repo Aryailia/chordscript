@@ -1,8 +1,12 @@
+//run: cargo test -- --nocapture
+
 //use std::fs::File;
 //use std::io::{BufRead, BufReader};
 #![allow(dead_code)]
 
 mod constants;
+//mod allocate;
+mod states;
 
 use constants::*;
 
@@ -41,7 +45,6 @@ fn main() {
     //}
 }
 
-//run: cargo test -- --nocapture
 //    let file = r#"
 //#hello
 //|super {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
@@ -61,6 +64,111 @@ fn main() {
 //|super h| dmenu
 //"#;
 
+
+#[test]
+fn parser() {
+    //let _line = r#"|super {{x, y}} ; super {{a }} ; super {{a,b}}|
+    //    echo {{1,2,3,4}}
+    //"#;
+
+    let _file = r#"
+    #
+#hello
+|super {{, alt, ctrl, ctrl alt}} Return|
+  {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
+|super {{c, t,g, k, v}} ; super {{b,s}}|
+  $TERMINAL -e {{curl,browser.sh}}  '{{terminal,gui}}' '{{bookmarks,search}}'
+
+|super shift q|"#;
+    let first = first_pass(_file).unwrap();
+    if false {
+        first.entries.iter().for_each(|x| {
+            println!(
+                "{}|==={}=== Set {} {}",
+                x.row, x.head, x.head_set_count, x.body_set_count,
+            );
+
+            println!(
+                "Permutations {}",
+                x.permutation_count,
+            );
+            println!("{:?}", x.body);
+        });
+        println!("Head sets: {}", first.max_head_set_count);
+        println!("Body sets: {}", first.max_body_set_count);
+        //println!("Second {:?}", first);
+    }
+    let mut owner = first.allocate();
+    let shortcut_list = parse(&mut owner).unwrap();
+
+    if true {
+        println!("{}", _file);
+        shortcut_list.iter().for_each(|shortcut| {
+            println!("> {}", shortcut.hotkey);
+            println!("  {}", shortcut.action.join(""));
+        })
+    }
+
+}
+
+fn parse<'a, 'b>(second: &'b mut PermutationsGenerator<'a>) -> Result<Vec<Shortcut<'a, 'b>>, StepError> {
+    // This is basically a lexer
+    // Validate the format and calculates the sizes of allocations
+    // We still do not pre-calculate the necessary number of chord allocations
+
+
+    // Allocate
+    for UnparsedEntry {
+        row: _row,
+        head,
+        head_set_count,
+        body,
+        body_set_count,
+        permutation_count,
+        ..
+    } in &second.entries {
+        let mut head_calc = Calculator::new(
+            *head,
+            *head_set_count,
+            &mut second.head_calculator_memory,
+        );
+        let mut body_calc = Calculator::new(
+            *body,
+            *body_set_count,
+            &mut second.body_calculator_memory,
+        );
+
+        for i in 0..*permutation_count {
+            let head_memory = &mut second.head_permutations;
+            let body_memory = &mut second.body_permutations;
+
+            let hotkey = render_head_variant(head, head_calc.permute(i)).unwrap();
+            push_body_variant(body_memory, body.trim(), body_calc.permute(i));
+
+            let body_entries_pushed = body_set_count * 2 + 1;
+            head_memory.push((body_entries_pushed, hotkey));
+        }
+    }
+
+    // Partition those allocations into the 'shorcuts' dynamic array
+    let mut shortcuts = Vec::with_capacity(second.head_permutations.len());
+    let mut rest = &mut second.body_permutations[..];
+    //if false {
+    for (action_field_count, hotkey) in &second.head_permutations {
+        let split = rest.split_at_mut(*action_field_count);
+        rest = split.1;
+
+        shortcuts.push(Shortcut {
+            hotkey,
+            action: split.0,
+        });
+    }
+    //}
+    debug_assert!(rest.len() == 0, "There are more body entries than what we allocated for");
+
+    Ok(shortcuts)
+}
+
 #[derive(Debug)]
 enum State {
     Head,
@@ -79,12 +187,55 @@ struct UnparsedEntry<'a> {
     row: usize,
 }
 
+impl<'a> UnparsedEntry<'a> {
+    fn new(text: &'a str, row: usize) -> Self {
+        Self {
+            head: text,
+            body: text,
+            head_set_count: 0,
+            body_set_count: 0,
+            permutation_count: 1,
+            row,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct EntryBlobMetadata<'a> {
     entries: Vec<UnparsedEntry<'a>>,
     max_head_set_count: usize,
     max_body_set_count: usize,
-    max_permutation_count: usize,
+    //total_head_space: usize,
+    total_body_space: usize,
+}
+impl<'a> EntryBlobMetadata<'a> {
+    fn new(after_first_pipe: &'a str) -> Self {
+        Self {
+            entries: Vec::with_capacity(after_first_pipe.split("\n|").count()),
+            max_head_set_count: 0,
+            max_body_set_count: 0,
+            //total_head_space: 0,
+            total_body_space: 0,
+        }
+    }
+
+    fn push_entry(&mut self, body_permutation_count: usize, entry: UnparsedEntry<'a>) -> Result<(), StepError> {
+        if body_permutation_count > entry.permutation_count {
+            //println!("{:?}\n{:?}", entry.head, entry.body);
+            //println!("head count {:?}", entry.permutation_count);
+            //println!("body count {:?}", entry.permutation_count);
+            return Err(
+                "This body for (TODO) needs more options than there are hotkey permutations for".into()
+            );
+        } else {
+            self.max_head_set_count = max(self.max_head_set_count, entry.head_set_count);
+            self.max_body_set_count = max(self.max_body_set_count, entry.body_set_count);
+            //self.total_head_space += (entry.head_set_count * 2 + 1) * entry.permutation_count;
+            self.total_body_space += (entry.body_set_count * 2 + 1) * entry.permutation_count;
+            self.entries.push(entry);
+            Ok(())
+        }
+    }
 }
 
 // TODO: test when body has more sets than head
@@ -94,14 +245,60 @@ struct EntryBlobMetadata<'a> {
 // The reverse case (more body variants) than 
 
 use std::cmp::max;
+use std::mem::replace;
 
-impl<'a> EntryBlobMetadata<'a> {
-    fn push_entry(&mut self, entry: UnparsedEntry<'a>) {
-        self.max_head_set_count = max(self.max_head_set_count, entry.head_set_count);
-        self.max_body_set_count = max(self.max_body_set_count, entry.body_set_count);
-        self.max_permutation_count = max(self.max_permutation_count, entry.permutation_count);
-        self.entries.push(entry);
+type StepError = String;
+type PassOutput<'a> = Result<(), StepError>;
+struct FirstPass<'a> {
+    original: &'a str,
+    walker: CharsWithIndex<'a>,
+    state: State,
+
+    key_start_index: usize,
+    head_set_size: usize,
+    body_set_size: usize,
+    entry_body_permutation_count: usize,
+    hotkeys_count: usize,
+    actions_count: usize,
+
+    entry: UnparsedEntry<'a>,
+    metadata: EntryBlobMetadata<'a>,
+}
+
+fn first_pass(source: &str) -> Result<EntryBlobMetadata, String> {
+    let (text, start_row) = FirstPass::step_init_until_first(source)?;
+    let mut fsm = FirstPass {
+        original: text,
+        walker: CharsWithIndex::new(text, start_row),
+        state: State::Head,
+
+        key_start_index: 0,
+        head_set_size: 0,
+        body_set_size: 0,
+        entry_body_permutation_count: 0,
+        hotkeys_count: 0,
+        actions_count: 0,
+
+        entry: UnparsedEntry::new(text, start_row),
+        metadata: EntryBlobMetadata::new(text),
+    };
+
+    while let Some(ch) = fsm.walker.next() {
+        match fsm.state {
+            State::Head => fsm.step_head(ch)?,
+            State::HeadBrackets => fsm.step_head_brackets(ch)?,
+            State::Body => fsm.step_body(ch)?, // This may push
+            State::BodyBrackets => fsm.step_body_brackets(ch)?,
+        };
     }
+    if let State::HeadBrackets | State::BodyBrackets = fsm.state {
+        return Err("Brackets not closed. Expected a '}}'".into());
+    }
+    let last = fsm.entry;
+    if !last.head.is_empty() {
+        fsm.metadata.push_entry(fsm.entry_body_permutation_count, last)?;
+    }
+    Ok(fsm.metadata)
 }
 
 impl<'a> FirstPass<'a> {
@@ -176,7 +373,7 @@ impl<'a> FirstPass<'a> {
             '\\' => {
                 return Err("You cannot escape characters with backslash '\\' in the hotkey definition portion".into());
             }
-            ',' => self.head_set_member_end(),
+            ',' => self.head_set_member(),
             '}' => {
                 if let Some('}') = self.walker.next() {
                     self.change_state(State::Head)?; // Call last
@@ -206,16 +403,14 @@ impl<'a> FirstPass<'a> {
                 self.entry.body = &self.original[offset..self.walker.prev];
                 //println!("==={}===\n{:?}", self.entry.head, self.entry.body);
 
-                let new_entry = UnparsedEntry {
-                    head: &self.original[self.walker.post..],
-                    body: &self.original[self.walker.post..],
-                    head_set_count: 0,
-                    body_set_count: 0,
-                    permutation_count: 1,
-                    row: self.walker.row,
-                };
-                self.metadata
-                    .push_entry(replace(&mut self.entry, new_entry));
+                let new_entry = UnparsedEntry::new(
+                    &self.original[self.walker.post..],
+                    self.walker.row,
+                );
+                self.metadata.push_entry(
+                    self.entry_body_permutation_count,
+                    replace(&mut self.entry, new_entry)
+                )?;
 
                 self.change_state(State::Head)?; // Call last
             }
@@ -231,7 +426,7 @@ impl<'a> FirstPass<'a> {
             '\\' => {
                 self.walker.next();
             }
-            ',' => self.body_set_member_end()?,
+            ',' => self.body_set_member(),
             '}' => {
                 if let Some('}') = self.walker.next() {
                     self.change_state(State::Body)?; // Call last
@@ -252,7 +447,7 @@ impl<'a> FirstPass<'a> {
     }
 
     #[inline]
-    fn head_set_member_end(&mut self) {
+    fn head_set_member(&mut self) {
         self.walker.eat_separator();
         self.key_start_index = self.walker.post;
         self.head_set_size += 1;
@@ -277,24 +472,14 @@ impl<'a> FirstPass<'a> {
     }
 
     #[inline]
-    fn body_set_member_end(&mut self) -> Result<(), StepError> {
+    fn body_set_member(&mut self) {
         self.body_set_size += 1;
-        let permutation_test= self.body_set_size * self.body_permutation_count;
-        if permutation_test > self.entry.permutation_count {
-            Err(
-                "This body for (TODO) needs more options than there are hotkey permutations for"
-                    .into(),
-            )
-        } else {
-            Ok(())
-        }
     }
     #[inline]
-    fn body_set_close(&mut self) -> Result<(), StepError> {
-        self.body_set_member_end()?; // adds to 'self.body_set_size'
+    fn body_set_close(&mut self) {
+        self.body_set_member(); // adds to 'self.body_set_size'
+        self.entry_body_permutation_count *= self.body_set_size;
         self.entry.body_set_count += 1;
-        self.body_permutation_count *= self.body_set_size;
-        Ok(())
     }
 
     fn change_state(&mut self, target: State) -> Result<(), StepError> {
@@ -305,7 +490,7 @@ impl<'a> FirstPass<'a> {
 
 
             (_, State::BodyBrackets) => self.body_set_start(),
-            (State::BodyBrackets, _) => self.body_set_close()?,
+            (State::BodyBrackets, _) => self.body_set_close(),
 
             (_, State::Head) => {
                 self.walker.eat_separator();
@@ -321,68 +506,6 @@ impl<'a> FirstPass<'a> {
     }
 }
 
-use std::mem::replace;
-
-type StepError = String;
-type PassOutput<'a> = Result<(), StepError>;
-struct FirstPass<'a> {
-    original: &'a str,
-    walker: CharsWithIndex<'a>,
-    state: State,
-
-    key_start_index: usize,
-    head_set_size: usize,
-    body_set_size: usize,
-    body_permutation_count: usize,
-
-    entry: UnparsedEntry<'a>,
-    metadata: EntryBlobMetadata<'a>,
-}
-fn first_pass(source: &str) -> Result<EntryBlobMetadata, String> {
-    let (text, start_row) = FirstPass::step_init_until_first(source)?;
-    let mut fsm = FirstPass {
-        original: text,
-        walker: CharsWithIndex::new(text, start_row),
-        state: State::Head,
-
-        key_start_index: 0,
-        head_set_size: 0,
-        body_set_size: 0,
-        body_permutation_count: 0,
-
-        entry: UnparsedEntry {
-            head: text,
-            body: text,
-            head_set_count: 0,
-            body_set_count: 0,
-            permutation_count: 1,
-            row: start_row,
-        },
-        metadata: EntryBlobMetadata {
-            entries: Vec::with_capacity(text.split("\n|").count()),
-            max_head_set_count: 0,
-            max_body_set_count: 0,
-            max_permutation_count: 1,
-        },
-    };
-
-    while let Some(ch) = fsm.walker.next() {
-        match fsm.state {
-            State::Head => fsm.step_head(ch)?,
-            State::HeadBrackets => fsm.step_head_brackets(ch)?,
-            State::Body => fsm.step_body(ch)?, // This may push
-            State::BodyBrackets => fsm.step_body_brackets(ch)?,
-        };
-    }
-    if let State::HeadBrackets | State::BodyBrackets = fsm.state {
-        return Err("Brackets not closed. Expected a '}}'".into());
-    }
-    let last = fsm.entry;
-    if !last.head.is_empty() {
-        fsm.metadata.push_entry(last);
-    }
-    Ok(fsm.metadata)
-}
 
 #[inline]
 fn peek_while<T, F>(iter: &mut std::iter::Peekable<T>, mut predicate: F)
@@ -415,13 +538,6 @@ fn render_head_variant(
     head: &str,
     permutation: &[usize]
 ) -> Result<Hotkey, String> {
-    let mut walker = DelimSplit::new(head, 1, split_separator).peekable();
-    let mut set_index = 0;
-
-
-    let mut modifiers = 0;
-    let mut key = None;
-    let mut chords = Vec::new();
 
     fn push_chord<'a>(
         chords: &mut Vec<Chord>,
@@ -439,24 +555,30 @@ fn render_head_variant(
         }
     };
 
+    let mut walker = DelimSplit::new(head, 1, split_separator).peekable();
+    let mut set_index = 0;
+
+    let mut modifiers = 0;
+    let mut key = None;
+    let mut chords = Vec::new();
     while let Some((field, _, _row)) = walker.next() {
         match field {
             "{{" => {
-                let mut count = 0;
+                let mut pos = 0;
                 let choice = permutation[set_index];
                 peek_while(&mut walker, |(peek, _, _)| {
-                    if count >= choice {
+                    if pos >= choice {
                         false
                     } else {
                         if *peek == "," {
-                            count += 1;
+                            pos += 1;
                         }
                         true
                     }
                 });
             }
             // 'first_pass()' ensures ',' is never outside of '{{..}}'
-            "," => next_until(&mut walker, |(field,_,_)| field == "}}"),
+            "," => peek_while(&mut walker, |(field,_,_)| *field != "}}"),
             "}}" => set_index += 1,
             ";" => push_chord(&mut chords, &mut key, &mut modifiers)?,
 
@@ -529,22 +651,25 @@ struct PermutationsGenerator<'a> {
     //entries: Vec<
     head_calculator_memory: Vec<usize>,
     body_calculator_memory: Vec<usize>,
-    head_variant_memory: Vec<&'a str>,
 
-    //head_variants: Vec<&'a str>,
-    //body_variants: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
+    head_permutations: Vec<(usize, Hotkey)>,
+    body_permutations: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
 
     entries: Vec<UnparsedEntry<'a>>,
+
 }
+
 impl<'a> EntryBlobMetadata<'a> {
     fn allocate(self) -> PermutationsGenerator<'a> {
+        let head_len: usize = self.entries.iter().map(|entry| entry.permutation_count).sum();
+
         PermutationsGenerator {
             head_calculator_memory: vec![0; self.max_head_set_count * 3],
             body_calculator_memory: vec![0; self.max_body_set_count * 3],
-            head_variant_memory: Vec::with_capacity(self.max_permutation_count),
+            //head_variant_memory: Vec::with_capacity(self.max_permutation_count),
 
-            //head_variants: Vec::with_capacity(head_len),
-            //body_variants: Vec::with_capacity(body_len),
+            head_permutations: Vec::with_capacity(head_len),
+            body_permutations: Vec::with_capacity(self.total_body_space),
 
             entries: self.entries,
         }
@@ -597,35 +722,6 @@ impl<'b> Calculator<'b> {
 }
 
 
-//impl<'a> EntryBlobMetadata<'a> {
-//    fn allocate(self) -> PermutationsGenerator<'a> {
-//        let memory_mid = self.max_head_set_count * 2;
-//        let memory_total = memory_mid + self.max_body_set_count * 2;
-//        let (head_len, body_len) = self.entries.iter()
-//            .fold((0, 0),|(mut head_len, mut body_len), entry| {
-//                head_len += if entry.head_set_count == 0 {
-//                    1
-//                } else {
-//                    entry.head_set_count * entry.permutation_count + 2
-//                };
-//                body_len += if entry.body_set_count == 0 {
-//                    1
-//                } else {
-//                    entry.body_set_count * entry.permutation_count + 2
-//                };
-//                (head_len, body_len)
-//            });
-//        PermutationsGenerator {
-//            calculator_memory: Vec::with_capacity(memory_total),
-//            memory_mid,
-//            head_variants: Vec::with_capacity(head_len),
-//            body_variants: Vec::with_capacity(body_len),
-//
-//            entries: self.entries,
-//        }
-//    }
-//}
-
 //struct EntryBlobMetadata<'a> {
 //    entries: Vec<UnparsedEntry<'a>>,
 //    max_head_set_count: usize,
@@ -668,85 +764,21 @@ impl<'b> Calculator<'b> {
 //    body: &'a [Cow<'a, str>],
 //}
 
-#[test]
-fn parser() {
-    //let line = r#"super {{space, x}} ; super {{w,y,z}} ; super {{a,b,c,d}}| $TERMINAL -e sh -c 'echo "nmcli"; echo "===="; sudo nmtui'; statusbar-startrefresh.sh"#;
-    //println!("line: {:?}", line);
-    //parse_entry(line);
-
-    let _line = r#"|super {{x, y}} ; super {{a }} ; super {{a,b}}|
-        echo {{1,2,3,4}}
-    "#;
-    //println!("{:#?}", parse_entry(line));
-    //println!("{:?}", split_head_body_and_validate(&line['|'.len_utf8()..]));
-    //println!("{:?}", &line[line.len()..]);
-
-    let _file = r#"
-    #
-#hello
-|super {{, alt, ctrl, ctrl alt}} Return|
-  {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
-|super {{c, t,g}} ; super {{b,s}}|
-  $TERMINAL -e {{curl,browser.sh}}  '{{terminal,gui}}' '{{bookmarks,search}}'
-
-|super shift q|"#;
-    let first = first_pass(_file).unwrap();
-    if false {
-        first.entries.iter().for_each(|x| {
-            println!(
-                "{}|==={}=== {} {} {}",
-                x.row, x.head, x.head_set_count, x.body_set_count, x.permutation_count
-            );
-            println!("{:?}", x.body);
-        });
-        println!("Head sets: {}", first.max_head_set_count);
-        println!("Body sets: {}", first.max_body_set_count);
-        //println!("Second {:?}", first);
-    }
-
-    let mut second = first.allocate();
-    for UnparsedEntry {
-        row: _row,
-        head,
-        head_set_count,
-        body,
-        body_set_count,
-        permutation_count,
-    } in second.entries {
-        let mut head_calc = Calculator::new(
-            head,
-            head_set_count,
-            &mut second.head_calculator_memory,
-        );
-        let mut body_calc = Calculator::new(
-            body,
-            body_set_count,
-            &mut second.body_calculator_memory,
-        );
-        //let head_variant = &mut second.head_variant_memory;
-        //head_variant.clear();
-        for i in 0..permutation_count {
-            let hotkey = render_head_variant(head, head_calc.permute(i));
-            //let cmd = render_body(body, permutation_count, body_calc.permute(i));
-            let cmd = render_body(body.trim(), permutation_count, body_calc.permute(i));
-
-            println!("{}", hotkey.unwrap());
-            println!("  {}", cmd.join(""));
-        }
-    }
-}
 
 use std::borrow::Cow;
-fn render_body<'a>(
+fn push_body_variant<'a>(
+    memory: &mut Vec<Cow<'a, str>>,
     body: &'a str,
-    set_count: usize,
     permutation: &[usize]
-) -> Vec<Cow<'a, str>> {
-    let mut output = Vec::with_capacity(set_count);
+) {
+    if body.is_empty() {
+        memory.push(body.into());
+        return;
+    }
     let mut buffer = String::new();
     let split = DelimSplit::new(body, 1, split_brackets);
     for (set_index, (regular, delim, _row)) in split.enumerate() {
-        output.push(regular.into());
+        memory.push(regular.into());
 
         buffer.clear();
         let delim = if delim.is_empty() {
@@ -777,7 +809,7 @@ fn render_body<'a>(
                 ',' | '}' => {
                     if field_index == permutation[set_index] {
                         buffer.push_str(&delim[start..until]);
-                        output.push(buffer.split_off(0).into());
+                        memory.push(buffer.split_off(0).into());
                         break;
                     }
                     debug_assert_eq!(','.len_utf8(), '}'.len_utf8());
@@ -791,7 +823,6 @@ fn render_body<'a>(
         }
         //println!("{:?} {:?}", regular, brackets);
     }
-    output
 }
 
 

@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 
 #[derive(Debug)]
-pub struct Shortcut<'a> {
-    pub hotkey: String, // TODO: change to Hotkey
-    pub action: Vec<Cow<'a, str>>,
+pub struct Shortcut<'a, 'b> {
+    pub hotkey: &'b Hotkey,
+    pub action: &'b mut [Cow<'a, str>],
 }
 
 #[derive(Debug)]
