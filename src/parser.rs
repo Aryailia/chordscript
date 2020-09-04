@@ -10,14 +10,35 @@ use std::ops::Range;
 type StepError = String;
 type PassOutput<'a> = Result<(), StepError>;
 
-pub fn parse_into_shortcut_list<'a, 'b>(
-    second: &'b mut PermutationsGenerator<'a>,
-) -> Result<Vec<Shortcut<'a, 'b>>, StepError> {
+pub struct PermutationsGenerator<'a> {
+    //entries: Vec<
+    head_calculator_memory: Vec<usize>,
+    body_calculator_memory: Vec<usize>,
+
+    partitioning: Vec<(usize, usize)>,
+    chords_memory: Vec<Chord>,
+    actions_memory: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
+}
+
+pub fn parse_into_shortcut_list<'a>(
+    first_pass: EntryBlobMetadata<'a>,
+) -> Result<PermutationsGenerator<'a>, StepError> {
     // This is basically a lexer
     // Validate the format and calculates the sizes of allocations
     // We still do not pre-calculate the necessary number of chord allocations
 
-    // Allocate
+    let head_variant_total_count: usize = first_pass
+        .entries
+        .iter()
+        .map(|entry| entry.permutation_count)
+        .sum();
+
+    let mut hc_mem = vec![0; first_pass.max_head_set_count * 3];
+    let mut bc_mem = vec![0; first_pass.max_body_set_count * 3];
+    let mut partitioning = Vec::with_capacity(head_variant_total_count);
+    let mut chords_memory = Vec::new(); // TODO: calculate this capacity
+    let mut body_memory = Vec::with_capacity(first_pass.total_body_space);
+
     for UnparsedEntry {
         row: _row,
         head,
@@ -26,45 +47,112 @@ pub fn parse_into_shortcut_list<'a, 'b>(
         body_set_count,
         permutation_count,
         ..
-    } in &second.entries
+    } in first_pass.entries
     {
-        let mut head_calc =
-            Calculator::new(*head, *head_set_count, &mut second.head_calculator_memory);
-        let mut body_calc =
-            Calculator::new(*body, *body_set_count, &mut second.body_calculator_memory);
+        let mut head_calc = Calculator::new(head, head_set_count, &mut hc_mem);
+        let mut body_calc = Calculator::new(body, body_set_count, &mut bc_mem);
 
-        for i in 0..*permutation_count {
-            let head_memory = &mut second.head_permutations;
-            let body_memory = &mut second.body_permutations;
+        for i in 0..permutation_count {
+            let chord_count =
+                push_head_variant(&mut chords_memory, head, head_calc.permute(i)).unwrap();
+            let action_mem_width = body_set_count * 2 + 1;
+            partitioning.push((chord_count, action_mem_width));
+            push_body_variant(&mut body_memory, body.trim(), body_calc.permute(i));
+        }
+    }
+    Ok(PermutationsGenerator {
+        head_calculator_memory: hc_mem,
+        body_calculator_memory: bc_mem,
 
-            let hotkey = render_head_variant(head, head_calc.permute(i)).unwrap();
-            push_body_variant(body_memory, body.trim(), body_calc.permute(i));
+        partitioning,
+        chords_memory,
+        actions_memory: body_memory,
+    })
+}
 
-            let body_entries_pushed = body_set_count * 2 + 1;
-            head_memory.push((body_entries_pushed, hotkey));
+impl<'a> PermutationsGenerator<'a> {
+    // "&'b mut self": Want an exclusive reference
+    pub fn shortcut_list<'b>(&'b mut self) -> ShortcutsIter<'a, 'b> {
+        ShortcutsIter {
+            partitioning: self.partitioning.iter(),
+            head_memory: &self.chords_memory[..],
+            body_memory: &self.actions_memory[..],
         }
     }
 
-    // Partition those allocations into the 'shorcuts' dynamic array
-    let mut shortcuts = Vec::with_capacity(second.head_permutations.len());
-    let mut rest = &mut second.body_permutations[..];
-    //if false {
-    for (action_field_count, hotkey) in &second.head_permutations {
-        let split = rest.split_at_mut(*action_field_count);
-        rest = split.1;
-
-        shortcuts.push(Shortcut {
-            hotkey,
-            action: split.0,
-        });
-    }
+    //// Example of exclusive borrows working with owned array
+    //pub fn shortcut_list<'b>(&'b mut self) -> Vec<Shortcut<'a, 'b>> {
+    //    let mut shortcuts = Vec::with_capacity(self.head_permutations.len());
+    //    let mut rest = &mut self.body_permutations[..];
+    //    //if false {
+    //    let mut index = 0;
+    //    for entry in self.entries.iter() {
+    //        let action_mem_width = entry.body_set_count * 2 + 1;
+    //        for _ in 0..entry.permutation_count {
+    //            let split = rest.split_at_mut(action_mem_width);
+    //            rest = split.1;
+    //            shortcuts.push(Shortcut {
+    //                hotkey: &self.head_permutations[index],
+    //                action: split.0,
+    //            });
+    //            index += 1;
+    //        }
+    //    }
+    //    shortcuts
     //}
-    debug_assert!(
-        rest.len() == 0,
-        "There are more body entries than what we allocated for"
-    );
+}
 
-    Ok(shortcuts)
+//pub fn parse_into_shortcut_list<'a, 'b>(
+//}
+pub struct ShortcutsIter<'a, 'b> {
+    partitioning: std::slice::Iter<'b, (usize, usize)>,
+    head_memory: &'b [Chord],
+    body_memory: &'b [Cow<'a, str>],
+}
+
+impl<'a, 'b> Iterator for ShortcutsIter<'a, 'b> {
+    type Item = Shortcut<'a, 'b>;
+
+    fn next(&mut self) -> Option<Shortcut<'a, 'b>> {
+        if let Some((chords, actions)) = self.partitioning.next() {
+            let hotkey = &self.head_memory[0..*chords];
+            let action = &self.body_memory[0..*actions];
+            self.head_memory = &self.head_memory[*chords..];
+            self.body_memory = &self.body_memory[*actions..];
+            Some(Shortcut {
+                hotkey: Hotkey(hotkey),
+                action,
+            })
+        } else {
+            //debug_assert!(
+            //    rest.len() == 0,
+            //    "There are more body entries than what we allocated for"
+            //);
+            None
+        }
+    }
+
+    //// TODO: Not sure how to make this work with exclusive references ('split_at_mut')
+    //    fn next(&'b mut self) -> Option<Self::Item> {
+    //        if self.index < self.permutation_count {
+    //            self.index += 1;
+    //        } else {
+    //            let entry = self.entries.next()?;
+    //            self.index = 0;
+    //            self.permutation_count = entry.permutation_count;
+    //            self.head_entry_mem_width = 1;
+    //            self.body_entry_mem_width = entry.body_set_count * 2 + 1;
+    //        }
+    //
+    //        let head = self.head_memory.split_at_mut(self.head_entry_mem_width);
+    //        let body = self.body_memory.split_at_mut(self.body_entry_mem_width);
+    //        self.head_memory = head.1;
+    //        self.body_memory = body.1;
+    //        Some(Shortcut2 {
+    //            hotkey: head.0,
+    //            action: body.0,
+    //        })
+    //    }
 }
 
 #[derive(Debug)]
@@ -147,7 +235,7 @@ impl<'a> EntryBlobMetadata<'a> {
 // same body variant but
 // The reverse case (more body variants) than
 
-struct FirstPass<'a> {
+struct FiniteStateMachine<'a> {
     original: &'a str,
     walker: CharsWithIndex<'a>,
     state: State,
@@ -164,8 +252,8 @@ struct FirstPass<'a> {
 }
 
 pub fn validate_and_calculate_allocations(source: &str) -> Result<EntryBlobMetadata, String> {
-    let (text, start_row) = FirstPass::step_init_until_first(source)?;
-    let mut fsm = FirstPass {
+    let (text, start_row) = FiniteStateMachine::step_init_until_first(source)?;
+    let mut fsm = FiniteStateMachine {
         original: text,
         walker: CharsWithIndex::new(text, start_row),
         state: State::Head,
@@ -200,7 +288,7 @@ pub fn validate_and_calculate_allocations(source: &str) -> Result<EntryBlobMetad
     Ok(fsm.metadata)
 }
 
-impl<'a> FirstPass<'a> {
+impl<'a> FiniteStateMachine<'a> {
     fn step_init_until_first(source: &str) -> Result<(&str, usize), StepError> {
         let mut row = 0;
         let mut start = source.len();
@@ -428,8 +516,11 @@ where
 //    }
 //
 //}
-
-fn render_head_variant(head: &str, permutation: &[usize]) -> Result<Hotkey, String> {
+fn push_head_variant(
+    chord_memory: &mut Vec<Chord>,
+    head: &str,
+    permutation: &[usize],
+) -> Result<usize, String> {
     fn push_chord<'a>(
         chords: &mut Vec<Chord>,
         key: &mut Option<Key>,
@@ -446,12 +537,12 @@ fn render_head_variant(head: &str, permutation: &[usize]) -> Result<Hotkey, Stri
         }
     };
 
-    let mut walker = DelimSplit::new(head, 1, split_separator).peekable();
+    let mut walker = DelimSplit::new(head, 1, head_lexer).peekable();
     let mut set_index = 0;
 
     let mut modifiers = 0;
     let mut key = None;
-    let mut chords = Vec::new();
+    let mut chord_count = 0;
     while let Some((field, _, _row)) = walker.next() {
         match field {
             "{{" => {
@@ -471,7 +562,10 @@ fn render_head_variant(head: &str, permutation: &[usize]) -> Result<Hotkey, Stri
             // 'first_pass()' ensures ',' is never outside of '{{..}}'
             "," => peek_while(&mut walker, |(field, _, _)| *field != "}}"),
             "}}" => set_index += 1,
-            ";" => push_chord(&mut chords, &mut key, &mut modifiers)?,
+            ";" => {
+                chord_count += 1;
+                push_chord(chord_memory, &mut key, &mut modifiers)?;
+            }
 
             "shift" => modifiers |= Mod::Shift as Modifiers,
             "super" => modifiers |= Mod::Super as Modifiers,
@@ -488,11 +582,12 @@ fn render_head_variant(head: &str, permutation: &[usize]) -> Result<Hotkey, Stri
             }
         }
     }
-    push_chord(&mut chords, &mut key, &mut modifiers)?;
-    Ok(Hotkey(chords))
+    chord_count += 1;
+    push_chord(chord_memory, &mut key, &mut modifiers)?;
+    Ok(chord_count)
 }
 
-fn split_separator(substr: &str) -> Range<usize> {
+fn head_lexer(substr: &str) -> Range<usize> {
     let mut chars = substr.chars();
     let mut delim_start = 0;
     let mut delim_close = 0;
@@ -528,44 +623,6 @@ fn split_separator(substr: &str) -> Range<usize> {
         delim_close += ch.len_utf8(); // Post last separator
     }
     delim_start..delim_close
-}
-
-//fn third_pass(metadata: EntryBlobMetadata) {
-//}
-
-//impl<'a> IntoIterator for EntryBlobMetadata<'a> {
-//    type Item = (&'a mut[&'a str], &'a mut[Cow<'a, str>]);
-//    type IntoIter = VariantGenerator<'a>;
-//}
-pub struct PermutationsGenerator<'a> {
-    //entries: Vec<
-    head_calculator_memory: Vec<usize>,
-    body_calculator_memory: Vec<usize>,
-
-    head_permutations: Vec<(usize, Hotkey)>,
-    body_permutations: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
-
-    entries: Vec<UnparsedEntry<'a>>,
-}
-
-impl<'a> EntryBlobMetadata<'a> {
-    pub fn allocate(self) -> PermutationsGenerator<'a> {
-        let head_len: usize = self
-            .entries
-            .iter()
-            .map(|entry| entry.permutation_count)
-            .sum();
-
-        PermutationsGenerator {
-            head_calculator_memory: vec![0; self.max_head_set_count * 3],
-            body_calculator_memory: vec![0; self.max_body_set_count * 3],
-            //head_variant_memory: Vec::with_capacity(self.max_permutation_count),
-            head_permutations: Vec::with_capacity(head_len),
-            body_permutations: Vec::with_capacity(self.total_body_space),
-
-            entries: self.entries,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -610,46 +667,6 @@ impl<'b> Calculator<'b> {
         &self.permutation
     }
 }
-
-//struct EntryBlobMetadata<'a> {
-//    entries: Vec<UnparsedEntry<'a>>,
-//    max_head_set_count: usize,
-//    max_body_set_count: usize,
-//}
-//struct UnparsedEntry<'a> {
-//    head: &'a str,
-//    body: &'a str,
-//    head_set_count: usize,
-//    body_set_count: usize,
-//    permutation_count: usize,
-//    row: usize,
-//}
-
-//struct EntryVariantGenerator<'a> {
-//    head: &'a str,
-//    head_set_sizes: &'a [usize],
-//    head_permutation: &'a [usize],
-//    head_memory: &'a [&'a str],
-//
-//    body: &'a str,
-//    body_set_sizes: &'a [usize],
-//    body_permutation: &'a [usize],
-//    body_memory: &'a [Cow<'a,str>],
-//
-//    index: usize,
-//    permutation_count: usize,
-//}
-//
-//impl<'a> Iterator for EntryVariantGenerator<'a> {
-//    type Item = Variant<'a>;
-//    fn next(&mut self) -> Option<Self::Item> {
-//        None
-//    }
-//}
-//struct Variant<'a> {
-//    head: &'a str,
-//    body: &'a [Cow<'a, str>],
-//}
 
 fn push_body_variant<'a>(memory: &mut Vec<Cow<'a, str>>, body: &'a str, permutation: &[usize]) {
     if body.is_empty() {
@@ -855,24 +872,6 @@ fn split_brackets(substr: &str) -> Range<usize> {
         }
     }
     start..close
-}
-
-fn split(source: &str, start_row: usize) -> DelimSplit {
-    DelimSplit {
-        buffer: source,
-        row: start_row,
-        delimit_by: |substr| {
-            let len = substr.len();
-            let l = '\n'.len_utf8();
-            let hotkey = substr.find("\n|").map(|i| i + l).unwrap_or(len);
-            let comment = substr.find("\n#").map(|i| i + l).unwrap_or(len);
-            if hotkey < comment {
-                hotkey..hotkey
-            } else {
-                comment..comment
-            }
-        },
-    }
 }
 
 struct DelimSplit<'a> {

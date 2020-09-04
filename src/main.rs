@@ -1,3 +1,5 @@
+//run: cargo build; time cargo run 2>/dev/null
+
 // Terminology
 // 
 // A set I refering to the '{{}}' construct. These represent enumerations
@@ -56,16 +58,17 @@ fn main() {
 
 |super shift q|"#;
     let first_pass = validate_and_calculate_allocations(_file).unwrap();
-    let mut list_owner = first_pass.allocate();
-    let shortcut_list = parse_into_shortcut_list(&mut list_owner).unwrap();
+    let mut list_owner = parse_into_shortcut_list(first_pass).unwrap();
+    let mut shortcut_list = list_owner.shortcut_list();
 
     if true {
         println!("========\n{}\n========", _file);
-        shortcut_list.iter().for_each(|shortcut| {
+        while let Some(shortcut) = shortcut_list.next() {
             println!("> {}", shortcut.hotkey);
             println!("  {}", shortcut.action.join(""));
-        })
+        }
     }
+    //let state_list = parse_into_keyspace_list(shortcut_list);
 
 }
 

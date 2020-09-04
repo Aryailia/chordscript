@@ -4,14 +4,14 @@ use std::borrow::Cow;
 
 #[derive(Debug)]
 pub struct Shortcut<'a, 'b> {
-    pub hotkey: &'b Hotkey,
-    pub action: &'b mut [Cow<'a, str>],
+    pub hotkey: Hotkey<'b>,
+    pub action: &'b [Cow<'a, str>],
 }
 
 #[derive(Debug)]
-pub struct Hotkey(pub Vec<Chord>);
+pub struct Hotkey<'b>(pub &'b [Chord]);
 
-impl std::fmt::Display for Hotkey {
+impl<'b> std::fmt::Display for Hotkey<'b> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let chords = &self.0;
         if !chords.is_empty() {
