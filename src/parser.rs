@@ -1,4 +1,3 @@
-//run: cargo test -- --nocapture
 use super::PERMUTATION_LIMIT;
 use crate::constants::*;
 
@@ -17,7 +16,7 @@ pub struct PermutationsGenerator<'a> {
 
     partitioning: Vec<(usize, usize)>,
     chords_memory: Vec<Chord>,
-    actions_memory: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
+    action_memory: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
 }
 
 pub fn parse_into_shortcut_list<'a>(
@@ -55,9 +54,10 @@ pub fn parse_into_shortcut_list<'a>(
         for i in 0..permutation_count {
             let chord_count =
                 push_head_variant(&mut chords_memory, head, head_calc.permute(i)).unwrap();
-            let action_mem_width = body_set_count * 2 + 1;
+            //let action_mem_width = body_set_count * 2 + 1;
+            let action_mem_width =
+                push_body_variant(&mut body_memory, body.trim(), body_calc.permute(i));
             partitioning.push((chord_count, action_mem_width));
-            push_body_variant(&mut body_memory, body.trim(), body_calc.permute(i));
         }
     }
     Ok(PermutationsGenerator {
@@ -66,93 +66,61 @@ pub fn parse_into_shortcut_list<'a>(
 
         partitioning,
         chords_memory,
-        actions_memory: body_memory,
+        action_memory: body_memory,
     })
 }
 
 impl<'a> PermutationsGenerator<'a> {
-    // "&'b mut self": Want an exclusive reference
-    pub fn shortcut_list<'b>(&'b mut self) -> ShortcutsIter<'a, 'b> {
-        ShortcutsIter {
-            partitioning: self.partitioning.iter(),
-            head_memory: &self.chords_memory[..],
-            body_memory: &self.actions_memory[..],
-        }
-    }
+    // Easier for debugging
+    fn allocate_unsorted_unchecked_shortcut_list<'b>(
+        &'b self,
+    ) -> Result<Vec<Shortcut<'a, 'b>>, StepError> {
+        let len = self.partitioning.len();
 
-    //// Example of exclusive borrows working with owned array
-    //pub fn shortcut_list<'b>(&'b mut self) -> Vec<Shortcut<'a, 'b>> {
-    //    let mut shortcuts = Vec::with_capacity(self.head_permutations.len());
-    //    let mut rest = &mut self.body_permutations[..];
-    //    //if false {
-    //    let mut index = 0;
-    //    for entry in self.entries.iter() {
-    //        let action_mem_width = entry.body_set_count * 2 + 1;
-    //        for _ in 0..entry.permutation_count {
-    //            let split = rest.split_at_mut(action_mem_width);
-    //            rest = split.1;
-    //            shortcuts.push(Shortcut {
-    //                hotkey: &self.head_permutations[index],
-    //                action: split.0,
-    //            });
-    //            index += 1;
-    //        }
-    //    }
-    //    shortcuts
-    //}
-}
+        let mut shortcut_list = Vec::with_capacity(len);
+        let mut chords_buffer = &self.chords_memory[..];
+        let mut action_buffer = &self.action_memory[..];
 
-//pub fn parse_into_shortcut_list<'a, 'b>(
-//}
-pub struct ShortcutsIter<'a, 'b> {
-    partitioning: std::slice::Iter<'b, (usize, usize)>,
-    head_memory: &'b [Chord],
-    body_memory: &'b [Cow<'a, str>],
-}
-
-impl<'a, 'b> Iterator for ShortcutsIter<'a, 'b> {
-    type Item = Shortcut<'a, 'b>;
-
-    fn next(&mut self) -> Option<Shortcut<'a, 'b>> {
-        if let Some((chords, actions)) = self.partitioning.next() {
-            let hotkey = &self.head_memory[0..*chords];
-            let action = &self.body_memory[0..*actions];
-            self.head_memory = &self.head_memory[*chords..];
-            self.body_memory = &self.body_memory[*actions..];
-            Some(Shortcut {
+        for (chords_count, action_width) in &self.partitioning {
+            let hotkey = &chords_buffer[0..*chords_count];
+            let action = &action_buffer[0..*action_width];
+            chords_buffer = &chords_buffer[*chords_count..];
+            action_buffer = &action_buffer[*action_width..];
+            shortcut_list.push(Shortcut {
                 hotkey: Hotkey(hotkey),
                 action,
-            })
-        } else {
-            //debug_assert!(
-            //    rest.len() == 0,
-            //    "There are more body entries than what we allocated for"
-            //);
-            None
+            });
         }
+        debug_assert_eq!(
+            chords_buffer.len(),
+            0,
+            "Did not fully consume 'chords_buffer'"
+        );
+        debug_assert_eq!(
+            action_buffer.len(),
+            0,
+            "Did not fully consume 'action_buffer'"
+        );
+
+        Ok(shortcut_list)
     }
 
-    //// TODO: Not sure how to make this work with exclusive references ('split_at_mut')
-    //    fn next(&'b mut self) -> Option<Self::Item> {
-    //        if self.index < self.permutation_count {
-    //            self.index += 1;
-    //        } else {
-    //            let entry = self.entries.next()?;
-    //            self.index = 0;
-    //            self.permutation_count = entry.permutation_count;
-    //            self.head_entry_mem_width = 1;
-    //            self.body_entry_mem_width = entry.body_set_count * 2 + 1;
-    //        }
-    //
-    //        let head = self.head_memory.split_at_mut(self.head_entry_mem_width);
-    //        let body = self.body_memory.split_at_mut(self.body_entry_mem_width);
-    //        self.head_memory = head.1;
-    //        self.body_memory = body.1;
-    //        Some(Shortcut2 {
-    //            hotkey: head.0,
-    //            action: body.0,
-    //        })
-    //    }
+    // Sorted and validated 'shorcut_list'
+    pub fn allocate_shortcut_list<'b>(&'b self) -> Result<Vec<Shortcut<'a, 'b>>, StepError> {
+        // TODO: unit test for duplicates
+        let mut shortcut_list = self.allocate_unsorted_unchecked_shortcut_list()?;
+        shortcut_list.sort_unstable();
+        for i in 0..shortcut_list.len() - 1 {
+            if shortcut_list[i].hotkey == shortcut_list[i + 1].hotkey {
+                return Err(format!(
+                    "Duplicate keys {} and {}",
+                    shortcut_list[i].hotkey,
+                    shortcut_list[i + 1].hotkey,
+                ));
+            }
+        }
+        Ok(shortcut_list)
+    }
 }
 
 #[derive(Debug)]
@@ -668,15 +636,17 @@ impl<'b> Calculator<'b> {
     }
 }
 
-fn push_body_variant<'a>(memory: &mut Vec<Cow<'a, str>>, body: &'a str, permutation: &[usize]) {
+fn push_body_variant<'a>(memory: &mut Vec<Cow<'a, str>>, body: &'a str, permutation: &[usize]) -> usize {
     if body.is_empty() {
         memory.push(body.into());
-        return;
+        return 1;
     }
+    let mut items_pushed = 0;
     let mut buffer = String::new();
     let split = DelimSplit::new(body, 1, split_brackets);
     for (set_index, (regular, delim, _row)) in split.enumerate() {
         memory.push(regular.into());
+        items_pushed += 1;
 
         buffer.clear();
         let delim = if delim.is_empty() {
@@ -708,6 +678,7 @@ fn push_body_variant<'a>(memory: &mut Vec<Cow<'a, str>>, body: &'a str, permutat
                     if field_index == permutation[set_index] {
                         buffer.push_str(&delim[start..until]);
                         memory.push(buffer.split_off(0).into());
+                        items_pushed += 1;
                         break;
                     }
                     debug_assert_eq!(','.len_utf8(), '}'.len_utf8());
@@ -721,6 +692,7 @@ fn push_body_variant<'a>(memory: &mut Vec<Cow<'a, str>>, body: &'a str, permutat
         }
         //println!("{:?} {:?}", regular, brackets);
     }
+    items_pushed
 }
 
 /******************************************************************************
