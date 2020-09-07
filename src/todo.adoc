@@ -1,0 +1,11 @@
+. [x] Preallocate 'body' ('action') when parsing the config file
+- [ ] Preallocate 'chords' ('head'/'hotkey') when parsing the config file
+- [ ] Semantic lifetime names ('a for string, 'b for shortcut owner)
+- [ ] Exclusive borrows (`&mut`) for shortcut list iterator
+- [ ] Implement cli interface
+- [ ] Output to i3/sway
+- [ ] Output to xfce
+- [ ] Output to sxhkd
+- [ ] Support for custom state (keyspace) for non-stateful window managers
+- [ ] Readme, include why. (no sxhkd for wayland)
+- [ ] Implement error handling that reports with line/column numbers

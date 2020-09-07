@@ -27,11 +27,14 @@
 
 mod constants;
 mod parser;
+mod keyspace;
 
 //use std::fs::File;
 //use std::io::{BufRead, BufReader};
 use parser::{validate_and_calculate_allocations, parse_into_shortcut_list};
+use keyspace::KeyspaceList;
 
+// This is per entry
 const PERMUTATION_LIMIT: usize = 1000;
 
 
@@ -57,16 +60,31 @@ fn main() {
   $TERMINAL -e {{curl,browser.sh}}  '{{terminal,gui}}' '{{bookmarks,search}}'
 
 |super shift q|"#;
-    let first_pass = validate_and_calculate_allocations(_file).unwrap();
-    let mut list_owner = parse_into_shortcut_list(first_pass).unwrap();
-    let mut shortcut_list = list_owner.shortcut_list();
 
-    if true {
-        println!("========\n{}\n========", _file);
-        while let Some(shortcut) = shortcut_list.next() {
+
+
+    let _file = r#"
+#
+|super {{a,b}};super {{d,e,f}};super{{g,h}}|
+echo {{1,2}}{{!,@,#}}{{A,B}}
+
+"#;
+    let first_pass = validate_and_calculate_allocations(_file).unwrap();
+    let list_owner = parse_into_shortcut_list(first_pass).unwrap();
+    let _shortcut_list = list_owner.keyspace_list().unwrap();
+
+    if false {
+        let sort_test = "
+|super + a; super +b| echo 1
+|super + a| echo 1";
+        let first_pass = validate_and_calculate_allocations(sort_test).unwrap();
+        let list_owner = parse_into_shortcut_list(first_pass).unwrap();
+        let shortcut_list = list_owner.allocate_shortcut_list().unwrap();
+        println!("========\n{}\n========", sort_test);
+        shortcut_list.iter().for_each(|shortcut| {
             println!("> {}", shortcut.hotkey);
             println!("  {}", shortcut.action.join(""));
-        }
+        });
     }
     //let state_list = parse_into_keyspace_list(shortcut_list);
 

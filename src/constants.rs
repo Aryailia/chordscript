@@ -2,13 +2,19 @@
 
 use std::borrow::Cow;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Shortcut<'a, 'b> {
     pub hotkey: Hotkey<'b>,
     pub action: &'b [Cow<'a, str>],
 }
 
-#[derive(Debug)]
+//impl<'a, 'b> Ord for Shortcut<'a, 'b> {
+//    fn cmp(&self, rhs: &Self) -> Ordering {
+//        df
+//    }
+//}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Hotkey<'b>(pub &'b [Chord]);
 
 impl<'b> std::fmt::Display for Hotkey<'b> {
@@ -24,7 +30,7 @@ impl<'b> std::fmt::Display for Hotkey<'b> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialOrd, Ord, Eq, PartialEq)]
 pub struct Chord {
     pub key: Key,
 
@@ -102,9 +108,17 @@ macro_rules! declare_keycodes {
             Size,
         }
 
-        #[derive(Clone, Debug)]
+        #[derive(Clone, Debug, PartialOrd, Ord, Eq, PartialEq)]
         pub enum Key {
             $($variant,)*
+        }
+
+        impl Key {
+            // Rust reference @PULL 639
+            // @RFC 2363 @ISSUE 60553
+            fn id(&self) -> isize {
+                unsafe { *(self as *const Self as *const isize) }
+            }
         }
 
         // TODO: replace this with phf::Map?
@@ -132,6 +146,8 @@ macro_rules! declare_keycodes {
         };
     };
 }
+
+// This order of these entries is the order that 'Ord' on Chord will sort them
 declare_keycodes! {
     "space"   = Space,
     "a"       = A,
@@ -184,9 +200,11 @@ fn unique_keys() {
     }
     for (i, k1) in KEYCODES.iter().enumerate() {
         for k2 in KEYCODES[i + 1..].iter() {
-            assert!(discriminant(k1) != discriminant(k2), "\"{:?}\" is duplicated", k1);
+            assert!(
+                discriminant(k1) != discriminant(k2),
+                "\"{:?}\" is duplicated",
+                k1
+            );
         }
     }
 }
-
-
