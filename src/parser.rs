@@ -111,7 +111,10 @@ impl<'a> PermutationsGenerator<'a> {
         let mut shortcut_list = self.allocate_unsorted_unchecked_shortcut_list()?;
         shortcut_list.sort_unstable();
         for i in 0..shortcut_list.len() - 1 {
-            if shortcut_list[i].hotkey == shortcut_list[i + 1].hotkey {
+            let chord_list1 = &shortcut_list[i].hotkey.0;
+            let chord_list2 = &shortcut_list[i + 1].hotkey.0;
+            let len = std::cmp::min(chord_list1.len(), chord_list2.len());
+            if &chord_list1[0..len] == &chord_list2[0..len] {
                 return Err(format!(
                     "Duplicate keys {} and {}",
                     shortcut_list[i].hotkey,

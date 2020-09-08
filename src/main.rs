@@ -1,4 +1,4 @@
-//run: cargo build; time cargo run 2>/dev/null
+//run: cargo build; time cargo run
 
 // Terminology
 // 
@@ -32,7 +32,7 @@ mod keyspace;
 //use std::fs::File;
 //use std::io::{BufRead, BufReader};
 use parser::{validate_and_calculate_allocations, parse_into_shortcut_list};
-use keyspace::KeyspaceList;
+use keyspace::{KeyspaceList, print_shortcut_list};
 
 // This is per entry
 const PERMUTATION_LIMIT: usize = 1000;
@@ -65,29 +65,16 @@ fn main() {
 
     let _file = r#"
 #
-|super {{a,b}};super {{d,e,f}};super{{g,h}}|
-echo {{1,2}}{{!,@,#}}{{A,B}}
+#|super {{a,b}};super {{d,e,f}};super{{g,h}}|
+|super a; super b| echo 2
+|super a| echo 1
 
 "#;
     let first_pass = validate_and_calculate_allocations(_file).unwrap();
     let list_owner = parse_into_shortcut_list(first_pass).unwrap();
-    let _shortcut_list = list_owner.keyspace_list().unwrap();
-
-    if false {
-        let sort_test = "
-|super + a; super +b| echo 1
-|super + a| echo 1";
-        let first_pass = validate_and_calculate_allocations(sort_test).unwrap();
-        let list_owner = parse_into_shortcut_list(first_pass).unwrap();
-        let shortcut_list = list_owner.allocate_shortcut_list().unwrap();
-        println!("========\n{}\n========", sort_test);
-        shortcut_list.iter().for_each(|shortcut| {
-            println!("> {}", shortcut.hotkey);
-            println!("  {}", shortcut.action.join(""));
-        });
-    }
-    //let state_list = parse_into_keyspace_list(shortcut_list);
-
+    let shortcut_list = list_owner.allocate_shortcut_list().unwrap();
+    print_shortcut_list(&shortcut_list);
+    //let _shortcut_list = list_owner.keyspace_list().unwrap();
 }
 
 //    let file = r#"

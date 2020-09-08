@@ -21,7 +21,7 @@ pub struct Keyspace<'a, 'b> {
 
 // As a 'trait' rather than direct 'impl' so we import explicitly
 pub trait KeyspaceList<'a> {
-    fn keyspace_list<'b>(&'b self) -> Result<Vec<Keyspace<'a, 'b>>, String>;
+    fn allocate_keyspace_list<'b>(&'b self) -> Result<Vec<Keyspace<'a, 'b>>, String>;
 }
 
 // This a means of providing window managers that do not support chaining
@@ -39,7 +39,7 @@ pub trait KeyspaceList<'a> {
 // 'VisitedTracker' which is just a (usize, usize) of the same length as
 // the shortcut_list to track the traversal of the shortcut list
 impl<'a> KeyspaceList<'a> for PermutationsGenerator<'a> {
-    fn keyspace_list<'b>(&'b self) -> Result<Vec<Keyspace<'a, 'b>>, String> {
+    fn allocate_keyspace_list<'b>(&'b self) -> Result<Vec<Keyspace<'a, 'b>>, String> {
         let shortcut_list = self.allocate_shortcut_list()?;
         let mut keyspace_list = Vec::new();
         let mut visited = VisitedTracker::new(shortcut_list.as_slice());
@@ -52,7 +52,7 @@ impl<'a> KeyspaceList<'a> for PermutationsGenerator<'a> {
             // 2. a new 'KeyspaceAction' for every pair (k, k + 1) for all k
             // 3. Through 'visited', ensure we do not double process entries
             //
-            // Continually narrow the containing partition by chord, 
+            // Continually narrow the containing partition by chord,
             for j in visited.unvisited_chord_indicies(i) {
                 // Build the keyspace
                 let mut space = Keyspace {
@@ -71,7 +71,6 @@ impl<'a> KeyspaceList<'a> for PermutationsGenerator<'a> {
         Ok(keyspace_list)
     }
 }
-
 
 impl<'a, 'b> Keyspace<'a, 'b> {
     fn push_partition(&mut self, partition: &[Shortcut<'a, 'b>], chord_index: usize) {
@@ -106,18 +105,25 @@ impl<'a, 'b> Keyspace<'a, 'b> {
         }
     }
 
-    fn print(&self) {
-        println!("=== {} ===", self.title);
+    pub fn print(&self) {
+        if self.title.0.is_empty() {
+            println!("=== '' ===");
+        } else {
+            println!("=== {} ===", self.title);
+        }
+        // TODO: making alignment work (fix chord Display trait)
         self.list.iter().for_each(|entry| match entry.1 {
             KeyspaceAction::SetState(chord_list) => {
-                println!("{} Set: {}", entry.0, Hotkey(chord_list))
+                println!("{0: <40} | Set: {1}", entry.0, Hotkey(chord_list))
             }
-            KeyspaceAction::Action(action) => println!("{} Action: {:?}", entry.0, action.join("")),
+            KeyspaceAction::Action(action) => {
+                println!("{0: <40} | Action: {1}", entry.0, action.join(""))
+            }
         });
     }
 }
 
-fn print_shortcut_list<'a, 'b>(list: &[Shortcut<'a, 'b>]) {
+pub fn print_shortcut_list<'a, 'b>(list: &[Shortcut<'a, 'b>]) {
     list.iter().for_each(|shortcut| {
         print!("  {}: ", shortcut.hotkey);
         println!("  {}", shortcut.action.join(""));
