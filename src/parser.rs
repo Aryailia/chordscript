@@ -19,9 +19,9 @@ pub struct PermutationsGenerator<'a> {
     action_memory: Vec<Cow<'a, str>>, // Dealing with escaping with owned data
 }
 
-pub fn parse_into_shortcut_list<'a>(
-    first_pass: EntryBlobMetadata<'a>,
-) -> Result<PermutationsGenerator<'a>, StepError> {
+pub fn parse_into_shortcut_list(
+    first_pass: EntryBlobMetadata,
+) -> Result<PermutationsGenerator, StepError> {
     // This is basically a lexer
     // Validate the format and calculates the sizes of allocations
     // We still do not pre-calculate the necessary number of chord allocations
@@ -114,7 +114,7 @@ impl<'a> PermutationsGenerator<'a> {
             let chord_list1 = &shortcut_list[i].hotkey.0;
             let chord_list2 = &shortcut_list[i + 1].hotkey.0;
             let len = std::cmp::min(chord_list1.len(), chord_list2.len());
-            if &chord_list1[0..len] == &chord_list2[0..len] {
+            if chord_list1[0..len] == chord_list2[0..len] {
                 return Err(format!(
                     "Duplicate keys {} and {}",
                     shortcut_list[i].hotkey,
@@ -185,10 +185,10 @@ impl<'a> EntryBlobMetadata<'a> {
             //println!("{:?}\n{:?}", entry.head, entry.body);
             //println!("head count {:?}", entry.permutation_count);
             //println!("body count {:?}", entry.permutation_count);
-            return Err(
+            Err(
                 "This body for (TODO) needs more options than there are hotkey permutations for"
                     .into(),
-            );
+            )
         } else {
             self.max_head_set_count = max(self.max_head_set_count, entry.head_set_count);
             self.max_body_set_count = max(self.max_body_set_count, entry.body_set_count);
@@ -416,7 +416,7 @@ impl<'a> FiniteStateMachine<'a> {
         self.entry.head_set_count += 1;
         //println!("group_end {:?}", self.entry.permutation_count, )
         if self.entry.permutation_count > PERMUTATION_LIMIT {
-            return Err("Too many permutations for <line>".into());
+            Err("Too many permutations for <line>".into())
         } else {
             Ok(())
         }
@@ -492,12 +492,12 @@ fn push_head_variant(
     head: &str,
     permutation: &[usize],
 ) -> Result<usize, String> {
-    fn push_chord<'a>(
+    fn push_chord(
         chords: &mut Vec<Chord>,
         key: &mut Option<Key>,
         modifiers: &mut Modifiers,
     ) -> Result<(), StepError> {
-        if let Some(code) = replace(key, None) {
+        if let Some(code) = std::mem::take(key) {
             chords.push(Chord {
                 key: code,
                 modifiers: replace(modifiers, 0),
@@ -585,7 +585,7 @@ fn head_lexer(substr: &str) -> Range<usize> {
     }
 
     // Eat separators
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             _ if !SEPARATOR.contains(&ch) => break,
             _ => {}
