@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 // TODO: Remove this clone, maybe. Was used for prototyping
 #[derive(Clone, Debug)]
-enum KeyspaceAction<'a, 'b> {
+pub enum KeyspaceAction<'a, 'b> {
     SetState(&'b [Chord]),
     Action(&'b [Cow<'a, str>]),
 }
@@ -13,10 +13,10 @@ enum KeyspaceAction<'a, 'b> {
 #[derive(Debug)]
 pub struct Keyspace<'a, 'b> {
     // The path to this keyspace (does not do anything semantically)
-    title: Hotkey<'b>,
+    pub title: Hotkey<'b>,
     // The list of keys. While inside this keyspace, press 'Chord' to
     // performan 'KeyspaceAction'
-    list: Vec<(Chord, KeyspaceAction<'a, 'b>)>,
+    pub list: Vec<(Chord, KeyspaceAction<'a, 'b>)>,
 }
 
 // As a 'trait' rather than direct 'impl' so we import explicitly

@@ -1,0 +1,17 @@
+#hello
+|super {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}} -e tmux.sh open
+|super shift {{, alt, ctrl, ctrl alt}} Return| {{$TERMINAL, alacritty, st, sakura}}
+|super shift q|
+
+# Main
+|super Space ; super w| $TERMINAL -e sh -c 'echo "nmcli"; echo "===="; sudo nmtui'; statusbar-startrefresh.sh
+|super Space ; super e| $TERMINAL -e emacs-sandbox.sh -P -O d "${EMACSINIT}"
+|super Space ; super a| $TERMINAL -e alsamixer; statusbar-startrefresh.sh
+|super Space ; super s| $TERMINAL -e syncthing -no-browser
+|super Space ; super z| $TERMINAL -e htop
+|super Space ; super {{m,n}}| $TERMINAL -e tmux.sh open '{{mw.sh,newsboat}}'
+
+
+|super d| dmenu_run
+|super h| dmenu
+

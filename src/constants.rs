@@ -45,7 +45,8 @@ impl std::fmt::Display for Chord {
                 write!(f, "{:?} + ", NUM_TO_MOD[i as usize].clone())?;
             }
         }
-        write!(f, "{:?}", self.key)
+        write!(f, "{}", KEYSTRS[self.key.id() as usize])
+        //write!(f, "{:?}", self.key)
     }
 }
 
@@ -109,6 +110,7 @@ macro_rules! declare_keycodes {
         }
 
         #[derive(Clone, Debug, PartialOrd, Ord, Eq, PartialEq)]
+        #[repr(usize)]
         pub enum Key {
             $($variant,)*
         }
@@ -116,8 +118,8 @@ macro_rules! declare_keycodes {
         impl Key {
             // Rust reference @PULL 639
             // @RFC 2363 @ISSUE 60553
-            fn id(&self) -> isize {
-                unsafe { *(self as *const Self as *const isize) }
+            fn id(&self) -> usize {
+                unsafe { *(self as *const Self as *const usize) }
             }
         }
 
@@ -149,7 +151,7 @@ macro_rules! declare_keycodes {
 
 // This order of these entries is the order that 'Ord' on Chord will sort them
 declare_keycodes! {
-    "space"   = Space,
+    "Space"   = Space,
     "a"       = A,
     "b"       = B,
     "c"       = C,
