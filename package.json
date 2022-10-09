@@ -1,0 +1,12 @@
+{
+  "name": "chordscript-wasm",
+  "version": "0.1.0",
+  "files": [
+    "chordscript_wasm_bg.wasm",
+    "chordscript_wasm.js",
+    "chordscript_wasm.d.ts"
+  ],
+  "module": "chordscript_wasm.js",
+  "types": "chordscript_wasm.d.ts",
+  "sideEffects": false
+}
